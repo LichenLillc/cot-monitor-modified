@@ -16,9 +16,9 @@ python -c "import nltk; nltk.download('punkt')"
 
 ### Pipeline
 
-The experimental pipeline follows the steps below. All code can be found in the `\scripts` directory, organized sequentially. We first generate a complete CoT and final response for a given harmful prompt (`0_generation.py`), then truncate the CoT at sentence boundaries and generate responses at each truncation (`1_truncation.py`). For each CoT–final response pair, we evaluate the safety of the final response (`2a_evaluate_safety.py`) and collect internal activations for the CoT (`2b_get_activations.py`). In step 3, we evaluate a range of monitoring methods, including simple probes (`3_probes.py`), and text classification methods (`3b` to `3d`). "Example usage of the scripts is shown below.
+The experimental pipeline follows the steps below. All code can be found in the `\scripts` directory, organized sequentially. We first generate a complete CoT and final response for a given harmful prompt (`0_generation.py`), then truncate the CoT at sentence boundaries and generate responses at each truncation (`1_truncation.py`). For each CoT–final response pair, we evaluate the safety of the final response (`2a_evaluate_safety.py`) and collect internal activations for the CoT (`2b_get_activations.py`). In step 3, we evaluate a range of monitoring methods, including simple probes (`3_probes.py`), and text classification methods (`3b` to `3d`).
 
-0. Generate CoT reasoning and final responses
+Step 0. Generate CoT reasoning and final responses
 ```bash
 python3 scripts/0_generation.py \
     --model_name simplescaling/s1.1-7B \
@@ -26,7 +26,7 @@ python3 scripts/0_generation.py \
     --output_dir raw_outputs
 ```
 
-1. Create truncated CoT and responses at each truncation point
+Step 1. Create truncated CoT and responses at each truncation point
 ```bash
 python3 scripts/1_truncation.py \
     --input_file raw_outputs/s1.1-7B_strongreject.jsonl \
@@ -34,13 +34,13 @@ python3 scripts/1_truncation.py \
     --base_output_dir processed
 ```
 
-2a. Evaluate safety of responses  
+Step 2a. Evaluate safety of responses  
 ```bash
 python3 scripts/2a_evaluate_safety.py \
     --results_folder processed/s1.1-7B_strongreject/labels
 ```
 
-2b. Extract CoT activations
+Step 2b. Extract CoT activations
 ```bash
 python3 scripts/2b_get_activations.py \
     --results_folder processed/s1.1-7B_strongreject/labels \
@@ -48,7 +48,7 @@ python3 scripts/2b_get_activations.py \
     --activations_dir processed/s1.1-7B_strongreject/activations
 ```
 
-3. Evaluate activation-based and text-based monitoring
+Step 3. Evaluate activation-based and text-based monitoring
 ```bash
 # Train simple probes
 python3 scripts/3a_probe.py \
