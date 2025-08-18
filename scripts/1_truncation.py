@@ -1,15 +1,32 @@
 """
-Incrementally remove CoT sentences and get model outputs.
+Takes generated CoT outputs and incrementally truncates them at different sentence boundaries,
+then generates new final answers for each truncation level.
 
-#########################
-### OUTPUT FORMAT ###
-### answer continuation from 21st input prompt after 13th CoT
-# -> output_dir/{input_fn}/labels/20/20_12_unlabeled.json (0-indexed)
+Process:
+1. Load generated CoT data from previous step
+2. Split CoT into sentences using NLTK
+3. Create truncated versions (0 sentences, 1 sentence, 2 sentences, etc.)
+4. Generate final answers for each truncation level
+5. Save results in organized directory structure
 
-### + save without any truncation
--> output_dir/{input_fn}/labels/20/20_all_unlabeled.json
-#########################
+Output Structure:
+    base_output_dir/
+    ├── {input_filename}/
+    │   └── labels/
+    │       ├── 0/  # First prompt (0-indexed)
+    │       │   ├── 0_0.json  # Prompt 0, 0 CoT sentences
+    │       │   ├── 0_1.json  # Prompt 0, 1 CoT sentence
+    │       │   └── ...
+    │       ├── 1/  # Second prompt
+    │       └── ...
 
+Each JSON file contains:
+    {
+        "raw_prompt": "Original safety prompt",
+        "prompt": "Formatted prompt with system message", 
+        "cot": "Truncated CoT reasoning",
+        "final_answer": "Generated final answer"
+    }
 """
 import difflib
 from vllm import LLM, SamplingParams
@@ -19,15 +36,12 @@ import pathlib
 from tqdm import tqdm
 import torch
 import argparse
-from pprint import pp
 from loguru import logger
 from tqdm import tqdm
 
 from utils import apply_sys_prompt, apply_think_sentinel, apply_answer_sentinel
 
-# import spacy #### incomaptible with vllm
-# nlp = spacy.load('en_core_web_sm')
-
+# Note: spacy is incompatible with vllm, using NLTK instead
 import nltk
 from nltk.tokenize import sent_tokenize
 
@@ -57,19 +71,18 @@ logger.info(f"--> save all truncation outputs to {str(SAVE_DIR)}")
 
 ########################
 model = LLM(
-    MODEL_NAME, # r1
+    MODEL_NAME,
     tensor_parallel_size=torch.cuda.device_count(),
     dtype=torch.bfloat16,
     seed=args.seed,
-    gpu_memory_utilization=0.80,
-    # max_model_len=8000+MAX_ANS_TOKENS,
+    gpu_memory_utilization=0.95,
+    max_model_len=8000+MAX_ANS_TOKENS,
     download_dir=args.cache_dir,
 )
 
 tok = AutoTokenizer.from_pretrained(
     MODEL_NAME
 )
-
 if "DeepSeek-R1" in MODEL_NAME:
     stop_token_ids = tok("<｜end of sentence｜>")["input_ids"] # r1
 elif "s1.1" in MODEL_NAME:
@@ -77,18 +90,16 @@ elif "s1.1" in MODEL_NAME:
 
 sampling_params = SamplingParams(
     max_tokens=MAX_ANS_TOKENS,
-    # min_tokens=1,
     stop_token_ids=stop_token_ids,
     skip_special_tokens=False,
     temperature=0.0,
 )
 
 ########################
-
+# Load generated CoT outputs and truncate
 
 all_vllm_inputs = list()
 all_metadata = list()
-
 processed_prompt_sent = set()
 
 with open(INPUT_FP) as rf:
@@ -102,7 +113,6 @@ with open(INPUT_FP) as rf:
                     processed_prompt_sent.add((int(prompt_id), int(sent_id)))
 
         line = json.loads(line)
-
         raw_prompt = line["raw_prompt"]
         input_prompt = line["prompt"]
         cot = line["cot"]
@@ -115,19 +125,12 @@ with open(INPUT_FP) as rf:
         for i in range(len(sentences)):
             consecutive_cots.append(" ".join(sentences[:i+1]))
         
-        ################################################################
-        #### sanity check on consecutive_cots[-1] and original cot #####
-        ################################################################
-        # output_list = [li for li in difflib.ndiff(cot, consecutive_cots[-1]) if li[0] != ' ']
-        # logger.warning(output_list) # sanity check
-        ################################################################
-
         for cot_i, consecutive_cot in enumerate(consecutive_cots):
             if (prompt_i, cot_i) in processed_prompt_sent:
                 # already processed
                 continue
                 
-            # final answer regeneration using vllm (all truncated CoT for a particular prompt) #
+            # final answer regeneration using vllm (all truncated CoT for a particular prompt)
             vllm_input = input_prompt + apply_answer_sentinel(consecutive_cot, MODEL_NAME)
             all_vllm_inputs.append(vllm_input)
             all_metadata.append({
@@ -138,7 +141,6 @@ with open(INPUT_FP) as rf:
                 "cot": consecutive_cot,
             })
 
-
 if all_vllm_inputs:
     BSZ = 1000
     logger.info(f"Generating {len(all_vllm_inputs)} samples in a batch of {BSZ}...")
@@ -148,7 +150,6 @@ if all_vllm_inputs:
             batch_inputs,
             sampling_params=sampling_params
         )
-        
         # Save batch results
         for j, o in enumerate(batch_outputs):
             metadata = all_metadata[i + j]

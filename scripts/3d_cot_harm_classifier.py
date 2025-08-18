@@ -1,7 +1,20 @@
 """
-Get CoT (and CoT paragraph) evaluation using the harm classifiers,
-then compare with ground truth labels.
+Evaluate final response alignment based on CoT (and CoT paragraph) safety. 
+Use fine-tuned classifiers from safety benchmarks.
+
+Evaluation methods:
+    - CoT: Full CoT reasoning safety
+    - CoT_para_max (at_least_one_unsafe_score): At least one unsafe paragraph detected
+    - CoT_para_majority (majority_unsafe_score): Majority of paragraphs classified as unsafe
+    
+Input data:
+    The same labeled data as the probe training scripts.
+    
+Output:
+    - *_labeled_cot.json: Full CoT safety evaluations
+    - *_labeled_cot_para.json: Paragraph-level evaluations with aggregation scores
 """
+
 import collections
 import os
 import json

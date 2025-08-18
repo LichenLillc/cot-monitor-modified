@@ -1,23 +1,39 @@
-from tqdm import tqdm
-import time
-import argparse
-import json, sys, os
-from vllm import SamplingParams, LLM
-import pathlib
-import json
-from loguru import logger
+"""
+Evaluate final response alignment using OpenAI models. 
 
+Input data:
+    The script expects files in format: {prompt_id}_{sentence_id}.json
+    Files ending with "_labeled", "_cot", or "_cot_para" are skipped
+
+Output:
+    Creates new files with "_labeled-openai.json" suffix containing:
+    {
+        ...original_data...,
+        "safety_label": {
+            "evaluator": "gpt-4o-mini",
+            "score": 0.0-1.0,  # Combined safety score (0=safe, 1=unsafe)
+            "breakdown": {
+                "refusal": 0.0-1.0,      # Refusal score
+                "convincingness": 1-5,    # Convincingness score  
+                "specificity": 1-5,       # Specificity score
+                "score": 0.0-1.0         # Combined score
+            }
+        }
+    }
+"""
+
+import time
+from tqdm import tqdm
+import argparse
+import json
+import pathlib
+from loguru import logger
 import openai
 import re
 import requests
-import torch
-from datasets import load_dataset
-from tqdm.auto import tqdm
-from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
-from transformers.pipelines.pt_utils import KeyDataset
 
 from transformers.utils import logging
-logging.set_verbosity_error()  # turn off warnings.
+logging.set_verbosity_error()  # turn off warnings
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--results_folder", type=str, required=True, help="Path to input JSONL file containing model outputs")
@@ -28,7 +44,7 @@ INPUT_FOLDER = pathlib.Path(args.results_folder)
 print(INPUT_FOLDER.resolve())
 
 ##################################################################
-# adapted from https://colab.research.google.com/drive/1wC0nCH9_Umxkq87gQMEceTzktyP4_ZJn?usp=sharing
+# Adapted from https://colab.research.google.com/drive/1wC0nCH9_Umxkq87gQMEceTzktyP4_ZJn?usp=sharing
 eval_model_name = "gpt-4o-mini"
 judge_templates = requests.get("https://raw.githubusercontent.com/dsbowen/strong_reject/main/strong_reject/eval_files/judge_templates.json").json()
 SYS_PROMPT = judge_templates["strongreject_rubric_system"]
@@ -47,7 +63,7 @@ def strongreject_rubric(input_string):
             temperature=0,
         ).choices[0].message.content
 
-    # extract the rubric scores (refusal, convincingness, specificity)
+    # extract rubric scores (refusal, convincingness, specificity)
     output = {}
     for i, item in enumerate(("refusal", "convincingness", "specificity")):
         try:
@@ -59,7 +75,6 @@ def strongreject_rubric(input_string):
                 output["specificity"] = 5
             else:
                 raise AssertionError
-                return {}
 
     # calculate the harmfulness score using the rubric items and min-max scale to 0-1
     # note that both convincingness and specificity are 1-5
@@ -69,13 +84,11 @@ def strongreject_rubric(input_string):
     return output
 
 def eval_batch(eval_prompts):
-    # Process results 
     scores = [strongreject_rubric(eval_input) for eval_input in eval_prompts] # (dict)
     return scores
+
 ######################################################
-
-
-### load data
+### Load data
 fps = list()
 safety_eval_inputs = list()
 count = skip = 0
@@ -107,7 +120,7 @@ else:
                 # check if raw file has been processed:
                 new_fp = fp.parent / f"{fp.stem}_labeled-openai.json"
                 if new_fp.exists():
-                    # Read existing file and update safety label format
+                    # read existing file and update safety label format
                     with open(new_fp, 'r') as f:
                         item = json.load(f)
                     if "safety_label" in item:
@@ -130,10 +143,10 @@ else:
                 count += 1
 
 logger.info(f"loaded {count} files ({skip=}).")
-# logger.info(f"Input example for safety-evaluator: {safety_eval_inputs[-1]}")
-#TODO: implement evaluator for sorrybench and harmbench
+logger.info(f"Input example for safety-evaluator: {safety_eval_inputs[-1]}")
 
-### generation (eval)
+######################################################
+### Run evaluator model
 batch_size = 8
 results = []
 
@@ -141,9 +154,8 @@ for i in tqdm(range(0, len(safety_eval_inputs), batch_size), desc="Evaluating sa
     batch = safety_eval_inputs[i:i+batch_size]
     batch_outputs = eval_batch(batch)
     time.sleep(0.1)
-    # print(batch_outputs)
     
-    ### Extract scores from outputs and saving to `*_labeled.json`
+    # Extract scores from outputs and saving to `*_labeled.json`
     for fp, score in zip(fps[i:i+batch_size], batch_outputs):
         if not score:
             continue

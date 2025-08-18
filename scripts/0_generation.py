@@ -1,3 +1,16 @@
+"""
+Generates long CoT traces and final answers from reasoning models. 
+
+Output Format:
+    Each line in the output JSONL contains:
+    {
+        "raw_prompt": "Original safety prompt",
+        "prompt": "Formatted prompt with system message",
+        "cot": "CoT reasoning",
+        "final_answer": "Model's final response"
+    }
+"""
+
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 import json
@@ -5,7 +18,6 @@ import pathlib
 from tqdm import tqdm
 import torch
 import argparse
-from pprint import pp
 from loguru import logger
 
 from utils import apply_sys_prompt, apply_think_sentinel, apply_answer_sentinel, seed_all
@@ -40,7 +52,6 @@ else:
     write_fp = SAVE_FP / args.output_file_jsonl
 logger.info(f"Writing to {write_fp}")
 
-
 ### load prompts
 prompts = list()
 with open(SAFETY_FP) as rf:
@@ -54,14 +65,13 @@ model = LLM(
     tensor_parallel_size=torch.cuda.device_count(),
     dtype=torch.bfloat16,
     seed=args.seed,
-    # gpu_memory_utilization=0.95,
-    # max_model_len=MAX_THINK_TOKENS + MAX_ANS_TOKENS,
+    gpu_memory_utilization=0.95,
+    max_model_len=MAX_THINK_TOKENS + MAX_ANS_TOKENS,
     download_dir=args.cache_dir,
 )
 tok = AutoTokenizer.from_pretrained(
     MODEL_NAME
 )
-
 if "DeepSeek-R1" in MODEL_NAME:
     stop_token_ids = tok("<｜end▁of▁sentence｜>")["input_ids"] # r1
     stop_words = []
@@ -70,7 +80,6 @@ elif "s1.1" in MODEL_NAME:
     stop_words = ["<|im_start|>answer"]
 
 ########################
-
 #### Count number of lines in input file to skip
 if write_fp.exists():
     with open(write_fp) as rf:
@@ -85,7 +94,6 @@ else:
     wf = open(write_fp, "w+", buffering=1)
 
 #### generating prompts
-# TODO: make batched generation
 for i, p in tqdm(enumerate(prompts), desc=f"🐢 generation...{SAFETY_FP}"):
     if i + 1 <= lineskip:
         continue
@@ -95,7 +103,6 @@ for i, p in tqdm(enumerate(prompts), desc=f"🐢 generation...{SAFETY_FP}"):
 
     sampling_params_think = SamplingParams(
         max_tokens=MAX_THINK_TOKENS,
-        # min_tokens=0,
         stop=stop_words,
         stop_token_ids=stop_token_ids,
         skip_special_tokens=False,
@@ -106,11 +113,6 @@ for i, p in tqdm(enumerate(prompts), desc=f"🐢 generation...{SAFETY_FP}"):
         sampling_params=sampling_params_think
     )
     _cot = o[0].outputs[0].text # NOTE: doesn't include `prompt` nor thinking sentinel token
-    print("\n======= DEBUG =======")
-    print("prompt:")
-    print(prompt)
-    print("\ncot:")
-    print(_cot)
 
     ####################################
     ### Budget Forcing to think more ###
@@ -134,20 +136,15 @@ for i, p in tqdm(enumerate(prompts), desc=f"🐢 generation...{SAFETY_FP}"):
                     prompt + _cot,
                     sampling_params=sampling_params_ignore
                 )
-                _cot += o[0].outputs[0].text # TODO: unit-test this
+                _cot += o[0].outputs[0].text
     
     ####################
     ### Final answer ###
     cot = _cot # Finished thinking
     _cot_prompt = prompt + apply_answer_sentinel(cot, MODEL_NAME)
 
-    print("\n======= DEBUG =======")
-    print("cot_prompt:")
-    print(_cot_prompt)
-
     sampling_params_answer = SamplingParams(
         max_tokens=MAX_ANS_TOKENS,
-        # min_tokens=1,
         stop_token_ids=stop_token_ids,
         skip_special_tokens=False,
         temperature=0.0,
@@ -158,10 +155,6 @@ for i, p in tqdm(enumerate(prompts), desc=f"🐢 generation...{SAFETY_FP}"):
     )
     output = o[0].outputs[0].text
 
-    print("\n======= DEBUG =======")
-    print("final_answer:")
-    print(output)
-
     ###########################
     ### Save to JSONL files ###
     saved_obj = {
@@ -170,7 +163,6 @@ for i, p in tqdm(enumerate(prompts), desc=f"🐢 generation...{SAFETY_FP}"):
         "cot": cot,
         "final_answer": output,
     }
-    # pp(saved_obj)
     wf.write(json.dumps(saved_obj) + "\n")
 
 print(f"🔥 Finished writing to {write_fp.resolve()}")

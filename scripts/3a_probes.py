@@ -1,4 +1,29 @@
-"""Train logistic regression and MLP probes on CoTs."""
+"""
+Trains simple probes (logistic regression and MLPs) to predict safety alignment outcomes from CoT activations.
+
+Models Trained:
+- Logistic Regression: Simple linear classifier with balanced class weights
+- MLP: 2-layer neural network with early stopping and validation
+- Random baselines: For comparison and significance testing
+
+Input data:
+    input_folder/
+    ├── activations/         # PyTorch tensors from 2b_get_activations.py
+    │   ├── 0_0.pt
+    │   ├── 0_1.pt
+    │   └── ...
+    └── labels/              # Safety labels from 2a_evaluate_safety.py
+        ├── 0/
+        │   ├── 0_0_labeled.json
+        │   ├── 0_1_labeled.json
+        │   └── ...
+        └── ...
+
+Output:
+    Prints performance metrics (F1, accuracy, PR-AUC).
+    Optionally saves detailed predictions and training data to TSV files.
+"""
+
 import collections
 from loguru import logger
 import os
@@ -100,12 +125,12 @@ def prepare_data(activations, labels):
     return X, labels_np, prompt_sent_ids
 
 def apply_pca(X_train, X_val, X_test):
-    # Fit PCA on training data
+    # fit PCA on training data
     pca_components = min(args.pca_components, X_train.shape[0], X_train.shape[1])
     logger.info(f"PCA:::reducing to {pca_components}")
     pca = PCA(n_components=pca_components)
     X_train_pca = pca.fit_transform(X_train)
-    # Transform test data using the same PCA
+    # transform test data using the same PCA
     X_val_pca = pca.transform(X_val)
     X_test_pca = pca.transform(X_test)
     return X_train_pca, X_val_pca, X_test_pca
@@ -262,7 +287,7 @@ def main():
     N = len(prompt_IDs)
     logger.debug(f"Loaded {len(activations_dict)=} activations of last-token CoTs for {N=} prompts.")
 
-    # Initialize lists to store results across all runs
+    # initialize lists to store results across all runs
     D_final_logreg_scores = collections.defaultdict(list)
     D_final_mlp_scores = collections.defaultdict(list)
     D_final_rand_lr_scores = collections.defaultdict(list)
@@ -311,6 +336,7 @@ def main():
         y_test = (labels_np[test_indices] >= threshold).astype(int)
 
         # current labels: safe -> 0; unsafe -> 1
+        # flip labels if safe is rarer
         if (y_test == 0).sum() < (y_test == 1).sum():
             logger.info("Flipping labels (0->1, 1->0) so unsafe -> 0, safe (rarer) -> 1")
             y_train = 1 - y_train
@@ -339,12 +365,10 @@ def main():
         ##############################
         np.random.seed(seed)  # use same seed as outer loop for reproducibility
         positive_prior = np.sum(y_train == 1)/len(y_train)
-        # random_y_pred = np.random.choice([1,0], size=len(X_test), p=[positive_prior, 1-positive_prior]) # use positive prior to choose from binary labels
         random_probs = np.random.uniform(0, 1, size=len(X_test))
         random_y_pred = (random_probs < positive_prior).astype(int)
         always_ones_pred = np.ones(len(X_test))
         always_zeros_pred = np.zeros(len(X_test))
-
 
         # shuffle
         np.random.seed(seed)  # use same seed as outer loop for reproducibility
@@ -357,7 +381,7 @@ def main():
         total_disagreement_percentage += disagreement_percentage
         rand_lr_pred, rand_lr_pred_prob = train_logistic_regression(X_train, y_train_shuffled, X_test, y_test)
 
-        ### eval
+        # eval
         logreg_eval = eval_pred(y_test, logreg_y_pred, logreg_y_pred_prob, metrics=["f1", "accuracy", "pr_auc"])
         mlp_eval = eval_pred(y_test, mlp_y_pred, mlp_y_pred_prob, metrics=["f1", "accuracy", "pr_auc"])
         rand_lr_eval = eval_pred(y_test, rand_lr_pred, rand_lr_pred_prob, metrics=["f1", "accuracy", "pr_auc"])

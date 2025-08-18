@@ -1,5 +1,12 @@
 """
-Train a BERT classifier on CoTs to predict answer safety.
+Train a BERT classifier on CoT texts to predict answer safety.
+
+Input data:
+    The same labeled data as the probe training scripts.
+
+Output:
+    Prints performance metrics (F1, accuracy, PR-AUC).
+    Optionally saves detailed predictions and training data to TSV files.
 """
 import collections
 import os

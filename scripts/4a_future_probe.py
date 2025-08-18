@@ -1,4 +1,6 @@
-"""Train logistic regression and MLP probes on CoTs."""
+"""
+Train probes on current CoT activations and labels to predict future answer safety.
+"""
 import collections
 from loguru import logger
 import os

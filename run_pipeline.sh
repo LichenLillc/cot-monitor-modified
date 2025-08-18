@@ -27,7 +27,7 @@ python3 0_generation.py \
     --output_file_jsonl "${RAW_OUT_FNAME}.jsonl" \
     --data_file $DATA_FILE \
 
-python3 1_truncation_batched.py \
+python3 1_truncation.py \
     --model_name $MODEL_NAME \
     --input_file "../raw_outputs/${RAW_OUT_FNAME}.jsonl" \
     --base_output_dir $PROCESSED_DIR \
@@ -36,20 +36,27 @@ python3 1_truncation_batched.py \
 python3 2a_evaluate_safety.py \
     --results_folder "${PROCESSED_DIR}/${RAW_OUT_FNAME}/labels"
 
+python3 2a_evaluate_safety_openai.py \
+    --results_folder "${PROCESSED_DIR}/${RAW_OUT_FNAME}/labels"
+
 python3 2b_get_activations.py \
     --results_folder "${PROCESSED_DIR}/${RAW_OUT_FNAME}/labels" \
     --activations_dir "${PROCESSED_DIR}/${RAW_OUT_FNAME}/activations"
 
-for sample_k in 50 100 500 1000 2500 5000
-do
-    echo "Running 3a_minimal_probe.py with sample_K=${sample_k}"
-    python3 3a_minimal_probe.py \
-        --input_folder "${PROCESSED_DIR}/${RAW_OUT_FNAME}" \
-        --pca \
-        --sample_K ${sample_k}
-done
+python3 3a_probes.py \
+    --input_folder "${PROCESSED_DIR}/${RAW_OUT_FNAME}" \
+    --pca \
 
-python3 3e_cot_harm_classifier.py \
+python3 3b_text_classifier.py \
+    --input_folder "${PROCESSED_DIR}/${RAW_OUT_FNAME}" \
+    --text_classifier_model "answerdotai/ModernBERT-large" \
+    --train_bsz 4 \
+
+python3 3c_openai_classifier.py \
+    --input_folder "${PROCESSED_DIR}/${RAW_OUT_FNAME}" \
+    --use_icl \
+
+python3 3d_cot_harm_classifier.py \
     --input_folder "${PROCESSED_DIR}/${RAW_OUT_FNAME}/labels" \
     --eval_cot \
     --eval_para

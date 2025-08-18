@@ -1,4 +1,18 @@
-"""Extract activations using the HF s1 model."""
+"""
+Extracts activations from language models at specific layers and token positions. 
+These activations will be used to train probes. 
+
+Process:
+1. Load the reasoning model with quantization
+2. For each truncated CoT sample:
+   - Format prompt + CoT + answer sentinel
+   - Extract hidden states from specified layer
+   - Save last token activation as tensor
+
+Output:
+    Saves PyTorch tensors in format: {prompt_id}_{sentence_id}.pt
+"""
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import json
@@ -11,12 +25,12 @@ import numpy as np
 from loguru import logger
 from utils import apply_answer_sentinel
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument("--results_folder", type=str, required=True, help="Path to input JSONL file containing model outputs")
 parser.add_argument("--model_name", type=str, default="simplescaling/s1.1-7B", help="Model to use for activation extraction")
 parser.add_argument("--activation_layer", type=int, default=-1, help="Which layer to extract activations from (default: last layer)")
 parser.add_argument("--activations_dir", type=str, required=True, help="Directory to store activation tensors")
+
 args = parser.parse_args()
 MODEL_NAME = args.model_name
 INPUT_FOLDER = pathlib.Path(args.results_folder)
@@ -36,13 +50,12 @@ def extract_last_token_activation(prompt, hf_model, layer_idx=args.activation_la
     return last_token_activation
 
 #######################
-
+# Load model
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.bfloat16
 )
-
 hf_model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
     quantization_config=bnb_config,
@@ -54,6 +67,7 @@ hf_model = AutoModelForCausalLM.from_pretrained(
 hf_tok = AutoTokenizer.from_pretrained(MODEL_NAME)
 
 #######################
+# Collect activations
 fps = list()
 for prompt_id_folder in tqdm(INPUT_FOLDER.glob("*"), desc="going through prompt_ids.."):
     for fp in prompt_id_folder.glob("*.json"):
@@ -74,4 +88,3 @@ for prompt_id_folder in tqdm(INPUT_FOLDER.glob("*"), desc="going through prompt_
         torch.save(activations, activation_path)
 
 logger.success(f"🔥 saved activations to {ACT_DIR.resolve()}")
-

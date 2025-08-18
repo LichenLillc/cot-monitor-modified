@@ -1,3 +1,26 @@
+"""
+Evaluates final response alignment using fine-tuned classifiers from the safety benchmarks.
+
+Supported safety benchmarks:
+- StrongReject
+- HarmBench
+- SorryBench
+
+Input Structure:
+    The script expects files in format: {prompt_id}_{sentence_id}.json
+    Files ending with "_labeled", "_cot", or "_cot_para" are skipped
+
+Output:
+    Creates new files with "_labeled.json" suffix containing:
+    {
+        ...original_data...,
+        "safety_label": {
+            "evaluator": "model_name",
+            "score": 0.0 to 1.0  # 0=safe, 1=unsafe
+        }
+    }
+"""
+
 from tqdm import tqdm
 import time
 import re
@@ -18,7 +41,7 @@ from transformers.pipelines.pt_utils import KeyDataset
 from utils import HARMBENCH_TEMPLATE, SORRY_BENCH_TEMPLATE
 
 from transformers.utils import logging
-logging.set_verbosity_error()  # turn off warnings.
+logging.set_verbosity_error()  # turn off warnings
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--results_folder", type=str, required=True, help="Path to input JSONL file containing model outputs")
@@ -219,10 +242,10 @@ def create_evaluator(results_folder_path):
         return StrongRejectEvaluator()
 
 ##################################################################
-# Start evaluation
+### Start evaluation
 evaluator = create_evaluator(INPUT_FOLDER)
 
-### load data
+### Load data
 fps = list()
 eval_prompts = list()
 eval_responses = list()
@@ -242,12 +265,12 @@ for prompt_id_folder in INPUT_FOLDER.glob("*"):
             item = json.load(f)
             fps.append(fp)
             eval_prompts.append(item["raw_prompt"])
-            eval_responses.append(item["final_answer"])  # evaluate final_answer for this script
+            eval_responses.append(item["final_answer"])
         count += 1
 
 logger.info(f"loaded {count} files ({skip=}).")
 
-### generation (eval)
+### Run evaluator model
 batch_size = 8
 results = []
 
