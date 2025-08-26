@@ -1,5 +1,6 @@
 """
-Train probes on current CoT activations and labels to predict future answer safety.
+Use a linear probe that is trained on immediate CoT-labels to predict the label at the very end of CoT 
+when given a partial proportion of CoT during test-time. 
 """
 import collections
 from loguru import logger
@@ -27,10 +28,11 @@ parser.add_argument("--sample_K", type=int, default=-1, help="number of training
 parser.add_argument("--pca", action="store_true", help="run PCA")
 parser.add_argument("--pca_components", type=int, default=50, help="number of different seeded runs")
 
-### future predictions
-parser.add_argument("--prior_cot", type=int, default=-1, help="how many CoT sentences already generated")
-parser.add_argument("--left_shift", type=int, default=0, help="left shift = 1 means predicting alignment for 1 CoT sentence in advance")
-parser.add_argument("--left_shift_mult", type=float, default=1.0, help="left shift mult = 2x means predicting two times prior sentences. (1x is base)")
+### future predictions: test-labels are always last. sample 5% of priors incrementally to see predictions.
+# parser.add_argument("--prior_cot", type=int, default=-1, help="how many CoT sentences already generated")
+# parser.add_argument("--left_shift", type=int, default=0, help="left shift = 1 means predicting alignment for 1 CoT sentence in advance")
+# parser.add_argument("--left_shift_mult", type=float, default=1.0, help="left shift mult = 2x means predicting two times prior sentences. (1x is base)")
+parser.add_argument("--cot_percent", type=float, default=100, help="100% means using all cot till the last sentence")
 logger.level("FUTURE", no=15, color="<red>", icon="@")
 
 ### storing test prediction outputs
@@ -43,10 +45,9 @@ if args.store_outputs:
     PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / INPUT_FOLDER.name
     PROBE_OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
-# assert bool(args.left_shift_mult - 1.0) != bool(args.left_shift) #xor relationship
-if args.left_shift > 0 or args.left_shift_mult > 0:
-    # running FUTURE prediction experiments
-    assert args.prior_cot >= 0
+# if args.left_shift > 0 or args.left_shift_mult > 0:
+#     # running FUTURE prediction experiments
+#     assert args.prior_cot >= 0
 
 ### load and engineer data
 def load_data():
@@ -267,13 +268,6 @@ def main():
 
     # Initialize lists to store results across all runs
     D_final_logreg_scores = collections.defaultdict(list)
-    D_final_mlp_scores = collections.defaultdict(list)
-    D_final_rand_lr_scores = collections.defaultdict(list)
-    D_final_random_scores = collections.defaultdict(list)
-    D_final_always_ones_scores = collections.defaultdict(list)
-    D_final_always_zeros_scores = collections.defaultdict(list)
-    D_final_theoretical_random_scores = collections.defaultdict(list)
-    total_disagreement_percentage = 0
 
     for seed in range(args.N_runs):
         np.random.seed(seed)  # for reproducibility
@@ -293,64 +287,44 @@ def main():
         X, labels_np, prompt_sent_ids  = prepare_data(activations_dict, labels_dict)
         train_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in train_prompt_ids]
         val_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in val_prompt_ids]
-        # 
-        if args.prior_cot >= 0:
-            logger.log("FUTURE", f"applying {args.prior_cot=} to test set")
-            test_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in test_prompt_ids and int(key.split('_')[1]) == args.prior_cot]
-        else:
-            test_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in test_prompt_ids]
+
+
+        # ### test_indices: all using 
+        # if args.prior_cot >= 0:
+        #     logger.log("FUTURE", f"applying {args.prior_cot=} to test set")
+        #     test_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in test_prompt_ids and int(key.split('_')[1]) == args.prior_cot]
+        # else:
+        #     test_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in test_prompt_ids]
 
         ##############################
-        ### FUTURE
+        ### FUTURE: task percented test_indices, then apply to find the final sentence label.
         ##############################
-        if args.left_shift:
-            absolute_left_shift = args.left_shift
-        elif args.left_shift_mult:
-            absolute_left_shift = int(args.prior_cot * (args.left_shift_mult - 1.0))
-        else:
-            absolute_left_shift = 0
-
         key2indices = {key: i for i, key in enumerate(prompt_sent_ids)}
         indices2key = {i: key for i, key in enumerate(prompt_sent_ids)}
 
-        ### is the left_shift the right config? (aka would any of the existing test prompts not have enough CoTs?)
-        shortest_cots = float('inf')
-        seen_test_key = set()
-        for test_i in test_indices:
-            test_key = indices2key[test_i]
-            prompt_id, sent_id = test_key.split("_")
-            if prompt_id in seen_test_key:
-                continue
-            max_len = 0
-            for future_sent_i in range(5000):
-                if f"{prompt_id}_{future_sent_i}" in key2indices:
-                    continue
-                max_len = max(future_sent_i, max_len)
-                break
-            seen_test_key.add(prompt_id)
-            shortest_cots = min(shortest_cots, max_len)
-        logger.log("FUTURE", f"analysis --- minimum #CoT in the test sets is {shortest_cots}.")
-        assert args.prior_cot + absolute_left_shift < shortest_cots, f"{args.prior_cot=} {absolute_left_shift=} {shortest_cots=}"
+        # map test prompts to each list of CoT
+        # TODO: can be made more efficient with regex then sort
+        prompt2sortedkey = collections.defaultdict(list)
+        for test_prompt_id in test_prompt_ids:
+            for i in range(len(prompt_sent_ids)):
+                k = f"{test_prompt_id}_{i}"
+                if k in key2indices:
+                    prompt2sortedkey[test_prompt_id].append(k) # sorted
         
-        ### left shift the labels for test_indices
+        # test label: last key
         left_shift_test_label_indices = []
-        original_test_indices = [] # create this because not all `test_indices` are added to `left_shift_test_label_indices`, and we want X_test to match
+        for _, L in prompt2sortedkey.items():
+            last_key = L[-1]
+            left_shift_test_label_indices.append(key2indices[last_key])
         
-        for test_i in test_indices:
-            test_key = indices2key[test_i]
-            prompt_id, sent_id = test_key.split("_")
-            left_shift_test_key = f"{prompt_id}_{int(sent_id) + absolute_left_shift}"
-            if left_shift_test_key in key2indices:
-                left_shift_test_i = key2indices[left_shift_test_key]
-                left_shift_test_label_indices.append(left_shift_test_i)
-                original_test_indices.append(test_i)
+        # test prompts: depend on cot_percent (100% means using all cot till the last sentence)
+        # basically, during test, we give a partial proportion of CoT, and the probe needs to predict the label of the last CoT sentence (at 100%).
+        test_indices = []
+        for _, L in prompt2sortedkey.items():
+            selected_key = L[min(int(args.cot_percent/100 * len(L)), len(L) - 1)]
+            print(f"test prompt selected key ({args.cot_percent=}):", selected_key)
+            test_indices.append(key2indices[selected_key])
 
-                if absolute_left_shift != 0: # sanity check
-                    assert left_shift_test_i != test_i
-                else:
-                    assert left_shift_test_i == test_i
-        
-        test_indices = original_test_indices
         ############################################################
         ############################################################
         
@@ -372,12 +346,8 @@ def main():
         y_val = (labels_np[val_indices] >= threshold).astype(int)
 
         y_test = (labels_np[left_shift_test_label_indices] >= threshold).astype(int) # NOTE: apply FUTURE thinking
-        _current_y_test = (labels_np[test_indices] >= threshold).astype(int)
-        _label_changes = _current_y_test != y_test
-        logger.log("FUTURE", f"applying left-shift = {absolute_left_shift} leads to {sum(_label_changes)/len(_label_changes):.1f}% out of N={len(_label_changes)} labels changed.")
-
-        # LABELS => unsafe: 0, safe (rarer): 1
-        if (y_val == 0).sum() < (y_val == 1).sum():
+        # current labels: safe -> 0; unsafe -> 1
+        if (y_test == 0).sum() < (y_test == 1).sum():
             logger.info("Flipping labels (0->1, 1->0) so unsafe -> 0, safe (rarer) -> 1")
             y_train = 1 - y_train
             y_val = 1 - y_val
@@ -422,7 +392,8 @@ def main():
                 pred_probs=logreg_y_pred_prob
             )
         
-    logger.log("FUTURE", f"{args.prior_cot=}, {absolute_left_shift=} ({args.left_shift=}, {args.left_shift_mult=})")
+
+    logger.log("FUTURE", f"{args.cot_percent=}")
     print(f"(N_train: {len(train_indices)}. N_test: {len(test_indices)})")
 
     print(calculate_metrics_stats([

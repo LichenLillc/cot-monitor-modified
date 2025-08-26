@@ -267,13 +267,6 @@ def main():
 
     # Initialize lists to store results across all runs
     D_final_logreg_scores = collections.defaultdict(list)
-    D_final_mlp_scores = collections.defaultdict(list)
-    D_final_rand_lr_scores = collections.defaultdict(list)
-    D_final_random_scores = collections.defaultdict(list)
-    D_final_always_ones_scores = collections.defaultdict(list)
-    D_final_always_zeros_scores = collections.defaultdict(list)
-    D_final_theoretical_random_scores = collections.defaultdict(list)
-    total_disagreement_percentage = 0
 
     for seed in range(args.N_runs):
         np.random.seed(seed)  # for reproducibility
@@ -404,10 +397,11 @@ def main():
         logger.log("FUTURE", f"applying left-shift = {absolute_left_shift} leads to {sum(_label_changes)/len(_label_changes):.1f}% out of N={len(_label_changes)} labels changed.")
 
         # LABELS => unsafe: 0, safe (rarer): 1
-        logger.info("Flipping labels (0->1, 1->0) so unsafe: 0, safe (rarer): 1")
-        y_train = 1 - y_train
-        y_val = 1 - y_val
-        y_test = 1 - y_test
+        if (y_val == 0).sum() < (y_val == 1).sum():
+            logger.info("Flipping labels (0->1, 1->0) so unsafe -> 0, safe (rarer) -> 1")
+            y_train = 1 - y_train
+            y_val = 1 - y_val
+            y_test = 1 - y_test
 
         keys_train = [prompt_sent_ids[i] for i in train_indices]
         keys_val = [prompt_sent_ids[i] for i in val_indices]
@@ -425,37 +419,10 @@ def main():
         ### train safety probes
         ##############################
         logreg_y_pred, logreg_y_pred_prob = train_logistic_regression(X_train, y_train, X_test, y_test)
-        # mlp_y_pred, mlp_y_pred_prob = train_mlp(X_train, y_train, X_val, y_val, X_test, y_test)
-        
-        ##############################
-        ### random baseline
-        ##############################
-        np.random.seed(seed)  # use same seed as outer loop for reproducibility
-        positive_prior = np.sum(y_train == 1)/len(y_train)
-        # random_y_pred = np.random.choice([1,0], size=len(X_test), p=[positive_prior, 1-positive_prior]) # use positive prior to choose from binary labels
-        random_probs = np.random.uniform(0, 1, size=len(X_test))
-        random_y_pred = (random_probs < positive_prior).astype(int)
-        always_ones_pred = np.ones(len(X_test))
-        always_zeros_pred = np.zeros(len(X_test))
 
         ### eval
         logreg_eval = eval_pred(y_test, logreg_y_pred, logreg_y_pred_prob, metrics=["f1", "accuracy", "pr_auc"])
-        # mlp_eval = eval_pred(y_test, mlp_y_pred, mlp_y_pred_prob, metrics=["f1", "accuracy", "pr_auc"])
-        # rand_lr_eval = eval_pred(y_test, rand_lr_pred, rand_lr_pred_prob, metrics=["f1", "accuracy", "pr_auc"])
-        random_eval = eval_pred(y_test, random_y_pred, random_probs, metrics=["f1", "accuracy", "pr_auc"])
-        theory_random_eval = {"f1": positive_prior, "pr_auc": positive_prior}
-        # always_ones_eval = eval_pred(y_test, always_ones_pred, metrics=["f1", "accuracy"])
-        # always_ones_eval["pr_auc"] = positive_prior # precision is p and recall is 1
-        # always_zeros_eval = eval_pred(y_test, always_zeros_pred, metrics=["f1", "accuracy"])
-        # always_zeros_eval["pr_auc"] = 0 # precision is undefined and recall is 0
-
         add_to_final_scores(logreg_eval, D_final_logreg_scores, 'logreg')
-        # add_to_final_scores(mlp_eval, D_final_mlp_scores, 'mlp')
-        # add_to_final_scores(rand_lr_eval, D_final_rand_lr_scores, 'random_logreg')
-        add_to_final_scores(random_eval, D_final_random_scores, 'empirical_random')
-        add_to_final_scores(theory_random_eval, D_final_theoretical_random_scores, 'theoretical_random')
-        # add_to_final_scores(always_ones_eval, D_final_always_ones_scores, "always_ones")
-        # add_to_final_scores(always_zeros_eval, D_final_always_zeros_scores, "always_zeros")
         
         ##############################
         #### save test outputs
@@ -474,31 +441,13 @@ def main():
                 pred_labels=logreg_y_pred,
                 pred_probs=logreg_y_pred_prob
             )
-            
-            save_probe_outputs_tsv(
-                output_dir=PROBE_OUTPUT_FOLDER,
-                probe_name=f"mlp_seed{seed}",
-                prompt_sent_ids=keys_test,
-                prompts=test_text_prompts,
-                cots=test_text_cots,
-                true_labels=y_test,
-                pred_labels=mlp_y_pred,
-                pred_probs=mlp_y_pred_prob
-            )
 
     logger.log("FUTURE", f"{args.prior_cot=}, {absolute_left_shift=} ({args.left_shift=}, {args.left_shift_mult=})")
     print(f"(N_train: {len(train_indices)}. N_test: {len(test_indices)})")
 
     print(calculate_metrics_stats([
         D_final_logreg_scores,
-        # D_final_mlp_scores,
-        # D_final_rand_lr_scores,
-        D_final_random_scores,
-        D_final_theoretical_random_scores,
-        # D_final_always_ones_scores,
-        # D_final_always_zeros_scores
     ]))
-
 
 if __name__ == "__main__":
     main()
