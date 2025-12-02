@@ -147,7 +147,7 @@ logger.info(f"Input example for safety-evaluator: {safety_eval_inputs[-1]}")
 
 ######################################################
 ### Run evaluator model
-batch_size = 8
+batch_size = 25
 results = []
 
 for i in tqdm(range(0, len(safety_eval_inputs), batch_size), desc="Evaluating safety"):

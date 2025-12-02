@@ -37,6 +37,7 @@ from datasets import load_dataset
 from tqdm.auto import tqdm
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
 from transformers.pipelines.pt_utils import KeyDataset
+from peft import PeftModel, PeftConfig
 
 from utils import HARMBENCH_TEMPLATE, SORRY_BENCH_TEMPLATE
 
@@ -70,7 +71,9 @@ class SafetyEvaluator:
 class StrongRejectEvaluator(SafetyEvaluator):
     def __init__(self):
         super().__init__()
-        self.model_name = "qylu4156/strongreject-15k-v1"
+        self.base_model_name = "google/gemma-2b"
+        self.adapter_name = "qylu4156/strongreject-15k-v1"
+        self.model_name = self.adapter_name
         
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -80,7 +83,18 @@ class StrongRejectEvaluator(SafetyEvaluator):
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, padding_side="left", cache_dir=CACHE_DIR)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, quantization_config=bnb_config, cache_dir=CACHE_DIR).to(device)
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            self.base_model_name, 
+            quantization_config=bnb_config, 
+            cache_dir=CACHE_DIR
+        ).to(device)
+        self.model = PeftModel.from_pretrained(
+            base_model,
+            self.adapter_name,
+            cache_dir=CACHE_DIR
+        ).to(device)
+        
         self.prompt_template = requests.get("https://raw.githubusercontent.com/alexandrasouly/strongreject/adding_finetuned_grader/strongreject/finetuned_evaluator_prompt.txt").text
     
     def eval_batch(self, prompts, responses):

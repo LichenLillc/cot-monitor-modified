@@ -30,6 +30,7 @@ parser.add_argument("--results_folder", type=str, required=True, help="Path to i
 parser.add_argument("--model_name", type=str, default="simplescaling/s1.1-7B", help="Model to use for activation extraction")
 parser.add_argument("--activation_layer", type=int, default=-1, help="Which layer to extract activations from (default: last layer)")
 parser.add_argument("--activations_dir", type=str, required=True, help="Directory to store activation tensors")
+# parser.add_argument("--batch_size", type=int, default=32, help="Batch size for activation extraction")
 
 args = parser.parse_args()
 MODEL_NAME = args.model_name
@@ -38,6 +39,7 @@ ACT_DIR = pathlib.Path(args.activations_dir)
 ACT_DIR.mkdir(parents=True, exist_ok=True)
 
 logger.info(f"Save activations to {ACT_DIR.resolve()}")
+# BATCH_SIZE = args.batch_size # --- Added BATCH_SIZE global
 
 def extract_last_token_activation(prompt, hf_model, layer_idx=args.activation_layer):
     inputs = hf_tok(prompt, return_tensors="pt").to("cuda")
@@ -71,7 +73,7 @@ hf_tok = AutoTokenizer.from_pretrained(MODEL_NAME)
 fps = list()
 for prompt_id_folder in tqdm(INPUT_FOLDER.glob("*"), desc="going through prompt_ids.."):
     for fp in prompt_id_folder.glob("*.json"):
-        if fp.stem.endswith("labeled"): continue
+        if "labeled" in fp.stem: continue
 
         prompt_idx, accum_cot_idx = fp.stem.split("_")
         activation_path = ACT_DIR / f"{prompt_idx}_{accum_cot_idx}.pt"

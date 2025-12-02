@@ -23,7 +23,7 @@ from loguru import logger
 
 parser = argparse.ArgumentParser(description="Train a BERT classifier on text data.")
 parser.add_argument("--input_folder", type=str, required=True, help="input folder containing activations and labels")
-parser.add_argument("--N_runs", type=int, default=5, help="number of different seeded runs")
+parser.add_argument("--N_runs", type=int, default=1, help="number of different seeded runs")
 parser.add_argument("--text_classifier_model", type=str, default="bert-base-uncased", help="name of the text classification model to use")
 parser.add_argument("--sample_K", type=int, default=-1, help="number of training samples")
 parser.add_argument("--store_outputs", action="store_true", help="whether to store model outputs")
