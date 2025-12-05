@@ -154,7 +154,7 @@ def main():
     parser.add_argument("--input_file", type=str, required=True, help="Path to the new .jsonl dataset file (e.g., '.../merge_traj_n150_u75_e75.jsonl')")
     
     # --- START: MODIFICATION 1 (File Naming) ---
-    parser.add_argument("--output_dir", type=str, default="./5b_results/", help="Directory to save all outputs")
+    parser.add_argument("--output_dir", type=str, default="../5b_results/", help="Directory to save all outputs")
     # Removed --output_jsonl and --output_csv
     # --- END: MODIFICATION 1 ---
     
