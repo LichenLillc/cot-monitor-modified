@@ -22,7 +22,8 @@ from utils import eval_pred, add_to_final_scores, calculate_metrics_stats, save_
 from loguru import logger
 
 parser = argparse.ArgumentParser(description="Train a BERT classifier on text data.")
-parser.add_argument("--input_folder", type=str, required=True, help="input folder containing activations and labels")
+parser.add_argument("--input_folder", type=str, default=None, help="input folder containing activations and labels")
+parser.add_argument("--input_file", type=str, default=None, help="input .jsonl file containing data")
 parser.add_argument("--N_runs", type=int, default=1, help="number of different seeded runs")
 parser.add_argument("--text_classifier_model", type=str, default="bert-base-uncased", help="name of the text classification model to use")
 parser.add_argument("--sample_K", type=int, default=-1, help="number of training samples")
@@ -32,12 +33,28 @@ parser.add_argument("--truncation_len", default=8192, type=int)
 parser.add_argument("--train_bsz", default=16, type=int)
 
 args = parser.parse_args()
-INPUT_FOLDER = pathlib.Path(args.input_folder)
+
+if args.input_folder and args.input_file:
+    logger.error("Please specify either --input_folder OR --input_file, not both.")
+    sys.exit(1)
+if not args.input_folder and not args.input_file:
+    logger.error("Please specify at least one input: --input_folder or --input_file.")
+    sys.exit(1)
+
+if args.input_folder:
+    INPUT_PATH = pathlib.Path(args.input_folder)
+    output_subdir_name = INPUT_PATH.name
+elif args.input_file:
+    INPUT_PATH = pathlib.Path(args.input_file)
+    # Requirement 2: output directory name is "my_" + filename
+    output_subdir_name = "my_" + INPUT_PATH.stem
+
 if args.store_outputs:
-    PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / INPUT_FOLDER.name
+    PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / output_subdir_name
+
 MODEL_NAME = args.text_classifier_model
 
-def load_data():
+def load_data_from_folder():
     """load activations and labels from the input folder"""
     labels = {}
     texts = {}
@@ -55,6 +72,43 @@ def load_data():
                     prompts[key] = data.get("prompt", "")
                     cots[key] = data.get("cot", "")
     return texts, prompts, cots, labels
+
+def _load_data_from_file():
+    """New loading logic for single .jsonl file input"""
+    labels = {}
+    texts = {}
+    prompts = {}
+    cots = {}
+    
+    logger.info(f"Loading data from file: {INPUT_PATH}")
+    with open(INPUT_PATH, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(tqdm(f, desc="Loading lines")):
+            try:
+                data = json.loads(line)
+                key = str(line_num)
+
+                if "hacking_label" in data:
+                    labels[key] = float(data["hacking_label"])
+                # prompt[0].content
+                p = data.get("prompt", [{}])[0].get("content", "")
+                # response (cot+answer)
+                c = data.get("response", "")
+                
+                texts[key] = p + c
+                prompts[key] = p
+                cots[key] = c
+                
+            except (json.JSONDecodeError, IndexError, KeyError) as e:
+                logger.warning(f"Skipping line {line_num} due to error: {e}")
+                
+    return texts, prompts, cots, labels
+
+
+def load_data():
+    if args.input_folder:
+        return load_data_from_folder()
+    elif args.input_file:
+        return _load_data_from_file()
 
 class TextDataset(torch.utils.data.Dataset):
     def __init__(self, texts, labels, tokenizer):
@@ -102,7 +156,7 @@ def train_bert_classifier(texts_train, y_train, texts_val, y_val, texts_test, y_
         eval_strategy="epoch",
         save_strategy="epoch",
         report_to="none",
-        save_total_limit = 5,
+        save_total_limit = 1,
     )
 
     trainer = Trainer(
