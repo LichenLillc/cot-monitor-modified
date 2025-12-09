@@ -89,10 +89,15 @@ def _load_data_from_file():
 
                 if "hacking_label" in data:
                     labels[key] = float(data["hacking_label"])
-                # prompt[0].content
-                p = data.get("prompt", [{}])[0].get("content", "")
-                # response (cot+answer)
-                c = data.get("response", "")
+                if data.get("traj_source") == "persona":
+                    # Prompt: messages[1].content.parts[0]
+                    p = data["messages"][1]["content"]["parts"][0]
+                    # Response (CoT+Answer): messages[2].content.parts[0]
+                    c = data["messages"][2]["content"]["parts"][0]
+                else:
+                    # Old format extraction (Default)
+                    p = data.get("prompt", [{}])[0].get("content", "")
+                    c = data.get("response", "")
                 
                 texts[key] = p + c
                 prompts[key] = p

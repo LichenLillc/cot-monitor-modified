@@ -123,16 +123,22 @@ def load_custom_data(input_file_path):
                 data = json.loads(line)
                 
                 # A1: Extract text (prompt + response)
-                prompt = data['prompt'][0]['content']
-                response = data['response']
+                if data.get("traj_source") == "persona":
+                    prompt = data['messages'][1]['content']['parts'][0]
+                    response = data['messages'][2]['content']['parts'][0]
+                else:
+                    # Default/Old format
+                    prompt = data['prompt'][0]['content']
+                    response = data['response']
+                
                 text = prompt + response
                 texts_to_classify.append(text)
 
-                # A1: Extract metadata
-                traj_ids.append(data['traj_id'])
+                # A2: Extract metadata
+                traj_ids.append(data.get('traj_id', f"line_{len(traj_ids)}"))
                 hacking_types.append(data['hacking_type'])
 
-                # A2: Extract and flip labels
+                # A3: Extract and flip labels
                 # Original: 0=safe, 1=unsafe
                 hacking_label = data['hacking_label']
                 

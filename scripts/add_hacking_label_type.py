@@ -8,7 +8,7 @@ def main():
     parser.add_argument("input_file", type=str, help="Path to input .jsonl file")
     parser.add_argument("--label", type=int, required=True, choices=[0, 1],
                         help="Value for hacking_label field (0 or 1)")
-    parser.add_argument("--type", type=str, required=True,
+    parser.add_argument("--type", type=str, default="unknown",
                         help="Value for hacking_type field (string)")
     parser.add_argument("--source", type=str, required=True,
                         help="Value for traj_source field (string)")
