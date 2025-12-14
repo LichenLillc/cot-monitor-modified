@@ -29,8 +29,8 @@ parser.add_argument("--text_classifier_model", type=str, default="bert-base-unca
 parser.add_argument("--sample_K", type=int, default=-1, help="number of training samples")
 parser.add_argument("--store_outputs", action="store_true", help="whether to store model outputs")
 parser.add_argument("--probe_output_folder", type=str, default="../probe_outputs/", help="folder to store model outputs and results")
-parser.add_argument("--truncation_len", default=8192, type=int)
-parser.add_argument("--train_bsz", default=16, type=int)
+parser.add_argument("--truncation_len", default=4096, type=int)
+parser.add_argument("--train_bsz", default=4, type=int)
 
 args = parser.parse_args()
 
@@ -89,21 +89,32 @@ def _load_data_from_file():
 
                 if "hacking_label" in data:
                     labels[key] = float(data["hacking_label"])
+                
                 if data.get("traj_source") == "persona":
                     # Prompt: messages[1].content.parts[0]
                     p = data["messages"][1]["content"]["parts"][0]
                     # Response (CoT+Answer): messages[2].content.parts[0]
                     c = data["messages"][2]["content"]["parts"][0]
                 else:
-                    # Old format extraction (Default)
-                    p = data.get("prompt", [{}])[0].get("content", "")
+                    # Logic modified based on user request
+                    raw_prompt = data.get("prompt")
+                    
+                    if isinstance(raw_prompt, str) and "\nuser\n" in raw_prompt:
+                        p = raw_prompt.split("\nuser\n", 1)[1]
+                    elif isinstance(raw_prompt, str):
+                        p = raw_prompt
+                    elif isinstance(raw_prompt, list) and len(raw_prompt) > 0:
+                        p = raw_prompt[0].get("content", "")
+                    else:
+                        p = ""
+
                     c = data.get("response", "")
                 
                 texts[key] = p + c
                 prompts[key] = p
                 cots[key] = c
                 
-            except (json.JSONDecodeError, IndexError, KeyError) as e:
+            except (json.JSONDecodeError, IndexError, KeyError, AttributeError) as e:
                 logger.warning(f"Skipping line {line_num} due to error: {e}")
                 
     return texts, prompts, cots, labels

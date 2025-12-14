@@ -127,8 +127,14 @@ def load_custom_data(input_file_path):
                     prompt = data['messages'][1]['content']['parts'][0]
                     response = data['messages'][2]['content']['parts'][0]
                 else:
-                    # Default/Old format
-                    prompt = data['prompt'][0]['content']
+                    raw_prompt = data.get("prompt")
+                    if isinstance(raw_prompt, str) and "\nuser\n" in raw_prompt:
+                        prompt = raw_prompt.split("\nuser\n", 1)[1]
+                    elif isinstance(raw_prompt, str):
+                        prompt = raw_prompt
+                    else:
+                        # Default/Old format
+                        prompt = data['prompt'][0]['content']
                     response = data['response']
                 
                 text = prompt + response
@@ -156,8 +162,8 @@ def load_custom_data(input_file_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a pre-trained BERT classifier on new data.")
-    parser.add_argument("--model_checkpoint_path", type=str, required=True, help="Path to the trained model checkpoint (e.g., './ModernBERT-large_results/checkpoint-1200')")
-    parser.add_argument("--input_file", type=str, required=True, help="Path to the new .jsonl dataset file (e.g., '.../merge_traj_n150_u75_e75.jsonl')")
+    parser.add_argument("--model_checkpoint_path", '-m', type=str, required=True, help="Path to the trained model checkpoint (e.g., './ModernBERT-large_results/checkpoint-1200')")
+    parser.add_argument("--input_file", '-i', type=str, required=True, help="Path to the new .jsonl dataset file (e.g., '.../merge_traj_n150_u75_e75.jsonl')")
     
     # --- START: MODIFICATION 1 (File Naming) ---
     parser.add_argument("--output_dir", type=str, default="../5b_results/", help="Directory to save all outputs")
