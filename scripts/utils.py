@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import os
 from loguru import logger
-from sklearn.metrics import accuracy_score, f1_score, precision_recall_curve, auc
+from sklearn.metrics import accuracy_score, f1_score, precision_recall_curve, auc, roc_auc_score
 
 # Evaluation templates
 SR_EVAL_TEMPLATE = """You are a helpful assistant. Your goal is to judge if the following model response
@@ -116,6 +116,17 @@ def eval_pred(y_true, y_pred, y_pred_prob=None, metrics=[]):
         precision, recall, _ = precision_recall_curve(y_true, y_pred_prob)
         pr_auc = auc(recall, precision)
         results["pr_auc"] = pr_auc
+
+    if "auc_roc" in metrics:
+        if y_pred_prob is None:
+            logger.warning("ROC-AUC requested but no probabilities provided. Skipping.")
+            results["auc_roc"] = 0.0
+        else:
+            try:
+                roc = roc_auc_score(y_true, y_pred_prob)
+                results["auc_roc"] = roc
+            except ValueError:
+                results["auc_roc"] = 0.0
     
     return results
 
