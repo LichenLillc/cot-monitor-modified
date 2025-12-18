@@ -313,6 +313,8 @@ def main():
         
         # prepare data for this iteration
         X, labels_np, prompt_sent_ids  = prepare_data(activations_dict, labels_dict)
+        logger.info(f"Checking X matrix stats: Mean={np.mean(X):.4f}, Max={np.max(X):.4f}, Min={np.min(X):.4f}")
+        logger.info(f"Is X all zeros? {np.all(X == 0)}")
         train_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in train_prompt_ids]
         val_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in val_prompt_ids]
         test_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in test_prompt_ids]

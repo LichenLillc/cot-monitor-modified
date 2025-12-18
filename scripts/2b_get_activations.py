@@ -46,9 +46,23 @@ def extract_last_token_activation(prompt, hf_model, layer_idx=args.activation_la
     with torch.no_grad():
         outputs = hf_model(**inputs, output_hidden_states=True, return_dict_in_generate=True)
     hidden_states = outputs.hidden_states
-    hidden_states = hidden_states[layer_idx][0] # only 1 batch
+    target_layer_states = hidden_states[layer_idx] # shape: (batch, seq_len, hidden_size)
+    
+    # 取最后一个 token
     last_token_idx = inputs.input_ids.shape[1] - 1
-    last_token_activation = hidden_states[last_token_idx].detach().cpu()
+    
+    # 1. 先取出原始 tensor (仍在 GPU 上)
+    raw_activation = target_layer_states[0, last_token_idx, :]
+    
+    # --- 调试检测点 ---
+    # 如果这里报错，说明模型计算时就已经溢出了，必须执行步骤 2 (改 float16)
+    if torch.isnan(raw_activation).any() or torch.isinf(raw_activation).any():
+        logger.error(f"Critical: NaN/Inf detected in raw GPU tensor! You MUST switch to float16.")
+    # ----------------
+    
+    # 2. 关键修复：在移至 CPU 之前，强制转为 float32
+    # 这能解决大部分由 bfloat16 保存格式引起的 NaN 问题
+    last_token_activation = raw_activation.to(torch.float32).detach().cpu()
     return last_token_activation
 
 #######################
