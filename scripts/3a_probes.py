@@ -54,7 +54,7 @@ parser.add_argument("--pca_components", type=int, default=50, help="number of di
 ### storing test prediction outputs
 parser.add_argument("--store_outputs", action="store_true", help="whether to store model outputs")
 parser.add_argument("--probe_output_folder", type=str, default="../probe_outputs/", help="folder to store model outputs and results")
-parser.add_argument("--save_models", action="store_true", help="whether to save trained models and PCA objects") # <--- [Modified] Added save_models arg
+parser.add_argument("--save_models", action="store_true", help="whether to save trained models and PCA objects")
 
 args = parser.parse_args()
 INPUT_FOLDER = pathlib.Path(args.input_folder)
@@ -134,7 +134,7 @@ def apply_pca(X_train, X_val, X_test):
     # transform test data using the same PCA
     X_val_pca = pca.transform(X_val)
     X_test_pca = pca.transform(X_test)
-    return X_train_pca, X_val_pca, X_test_pca, pca # <--- [Modified] Return pca object
+    return X_train_pca, X_val_pca, X_test_pca, pca
 
 ### logistic regression
 def train_logistic_regression(X_train, y_train, X_test, y_test):
@@ -144,7 +144,7 @@ def train_logistic_regression(X_train, y_train, X_test, y_test):
     y_pred = model.predict(X_test)
     y_pred_prob = model.predict_proba(X_test)[:, 1]
 
-    return y_pred, y_pred_prob, model # <--- [Modified] Return model
+    return y_pred, y_pred_prob, model
 
 ### MLP
 class CustomMLP2Layer(nn.Module):
@@ -273,7 +273,7 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
         y_pred_prob = y_pred_tensor.cpu().numpy().flatten()
         
     y_pred = (y_pred_prob >= 0.5).astype(int)
-    return y_pred, y_pred_prob, model # <--- [Modified] Return model
+    return y_pred, y_pred_prob, model
 
 
 ########################
@@ -296,6 +296,9 @@ def main():
     D_final_always_zeros_scores = collections.defaultdict(list)
     D_final_theoretical_random_scores = collections.defaultdict(list)
     total_disagreement_percentage = 0
+    
+    # [New] List to store per-seed metrics
+    seed_results = []
 
     for seed in range(args.N_runs):
         np.random.seed(seed)  # for reproducibility
@@ -351,7 +354,7 @@ def main():
 
         pca_model = None
         if args.pca:
-            X_train, X_val, X_test, pca_model = apply_pca(X_train, X_val, X_test) # <--- [Modified] Capture PCA model
+            X_train, X_val, X_test, pca_model = apply_pca(X_train, X_val, X_test)
         
         logger.debug(f"Training set: {len(X_train)} latents (Safe: {np.sum(y_train==1)}, Unsafe: {np.sum(y_train==0)})")
         logger.debug(f"Validation set: {len(X_val)} latents (Safe: {np.sum(y_val==1)}, Unsafe: {np.sum(y_val==0)})")
@@ -360,7 +363,6 @@ def main():
         ##############################
         ### train safety probes
         ##############################
-        # [Modified] Capture trained models
         logreg_y_pred, logreg_y_pred_prob, logreg_model = train_logistic_regression(X_train, y_train, X_test, y_test)
         mlp_y_pred, mlp_y_pred_prob, mlp_model = train_mlp(X_train, y_train, X_val, y_val, X_test, y_test)
 
@@ -386,25 +388,27 @@ def main():
         rand_lr_pred, rand_lr_pred_prob, _ = train_logistic_regression(X_train, y_train_shuffled, X_test, y_test)
 
         # eval
-        # [Modified] Added "auc_roc" to metrics list
         eval_metrics = ["f1", "accuracy", "pr_auc", "auc_roc"]
         logreg_eval = eval_pred(y_test, logreg_y_pred, logreg_y_pred_prob, metrics=eval_metrics)
         mlp_eval = eval_pred(y_test, mlp_y_pred, mlp_y_pred_prob, metrics=eval_metrics)
         rand_lr_eval = eval_pred(y_test, rand_lr_pred, rand_lr_pred_prob, metrics=eval_metrics)
         random_eval = eval_pred(y_test, random_y_pred, random_probs, metrics=eval_metrics)
-        theory_random_eval = {"f1": positive_prior, "pr_auc": positive_prior, "auc_roc": 0.5} # Added theoretical ROC
+        theory_random_eval = {"f1": positive_prior, "pr_auc": positive_prior, "auc_roc": 0.5} 
         always_ones_eval = eval_pred(y_test, always_ones_pred, metrics=["f1", "accuracy"])
-        always_ones_eval["pr_auc"] = positive_prior # precision is p and recall is 1
+        always_ones_eval["pr_auc"] = positive_prior 
         always_ones_eval["auc_roc"] = 0.5
         always_zeros_eval = eval_pred(y_test, always_zeros_pred, metrics=["f1", "accuracy"])
-        always_zeros_eval["pr_auc"] = 0 # precision is undefined and recall is 0
+        always_zeros_eval["pr_auc"] = 0 
         always_zeros_eval["auc_roc"] = 0.5
 
-        # [Modified] Print detailed metrics for model selection
-        logger.info(f"Seed {seed} | LogReg: F1={logreg_eval['f1']:.3f}, Acc={logreg_eval['accuracy']:.3f}, PR-AUC={logreg_eval['pr_auc']:.3f}, ROC-AUC={logreg_eval['auc_roc']:.3f}")
-        logger.info(f"Seed {seed} | MLP: F1={mlp_eval['f1']:.3f}, Acc={mlp_eval['accuracy']:.3f}, PR-AUC={mlp_eval['pr_auc']:.3f}, ROC-AUC={mlp_eval['auc_roc']:.3f}")
+        # [New] Collect metrics for final summary table
+        seed_results.append({
+            "seed": seed,
+            "logreg": logreg_eval,
+            "mlp": mlp_eval
+        })
 
-        # [Modified] Save models
+        # Save models
         if args.save_models:
             models_dir = PROBE_OUTPUT_FOLDER / "saved_models"
             models_dir.mkdir(parents=True, exist_ok=True)
@@ -463,6 +467,23 @@ def main():
 
     print(f"---- mean disagreement after shuffling: {total_disagreement_percentage/args.N_runs:.2f}%")
     print(f"(N_train: {len(train_indices)}. N_test: {len(test_indices)})")
+
+    # [New] Print Per-Seed Summary Table
+    print("\n" + "="*85)
+    print(f"PER-SEED PERFORMANCE SUMMARY")
+    print("="*85)
+    print(f"{'Seed':<5} | {'Model':<8} | {'F1':<8} | {'Acc':<8} | {'PR-AUC':<8} | {'ROC-AUC':<8}")
+    print("-" * 85)
+    for res in seed_results:
+        s = res['seed']
+        # LogReg row
+        lr = res['logreg']
+        print(f"{s:<5} | {'LogReg':<8} | {lr['f1']:.4f}   | {lr['accuracy']:.4f}   | {lr['pr_auc']:.4f}   | {lr['auc_roc']:.4f}")
+        # MLP row
+        mlp = res['mlp']
+        print(f"{'':<5} | {'MLP':<8} | {mlp['f1']:.4f}   | {mlp['accuracy']:.4f}   | {mlp['pr_auc']:.4f}   | {mlp['auc_roc']:.4f}")
+        print("-" * 85)
+    print("="*85 + "\n")
 
     print(calculate_metrics_stats([
         D_final_logreg_scores,
