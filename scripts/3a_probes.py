@@ -40,6 +40,7 @@ from sklearn.preprocessing import StandardScaler
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
+import joblib
 
 from utils import eval_pred, add_to_final_scores, calculate_metrics_stats, save_probe_outputs_tsv
 
@@ -53,12 +54,12 @@ parser.add_argument("--pca_components", type=int, default=50, help="number of di
 ### storing test prediction outputs
 parser.add_argument("--store_outputs", action="store_true", help="whether to store model outputs")
 parser.add_argument("--probe_output_folder", type=str, default="../probe_outputs/", help="folder to store model outputs and results")
+parser.add_argument("--save_models", action="store_true", help="whether to save trained models and PCA objects") # <--- [Modified] Added save_models arg
 
 args = parser.parse_args()
 INPUT_FOLDER = pathlib.Path(args.input_folder)
-if args.store_outputs:
-    PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / INPUT_FOLDER.name
-    PROBE_OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / INPUT_FOLDER.name
+PROBE_OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 ### load and engineer data
 def load_data():
@@ -133,8 +134,7 @@ def apply_pca(X_train, X_val, X_test):
     # transform test data using the same PCA
     X_val_pca = pca.transform(X_val)
     X_test_pca = pca.transform(X_test)
-    return X_train_pca, X_val_pca, X_test_pca
-
+    return X_train_pca, X_val_pca, X_test_pca, pca # <--- [Modified] Return pca object
 
 ### logistic regression
 def train_logistic_regression(X_train, y_train, X_test, y_test):
@@ -144,7 +144,7 @@ def train_logistic_regression(X_train, y_train, X_test, y_test):
     y_pred = model.predict(X_test)
     y_pred_prob = model.predict_proba(X_test)[:, 1]
 
-    return y_pred, y_pred_prob
+    return y_pred, y_pred_prob, model # <--- [Modified] Return model
 
 ### MLP
 class CustomMLP2Layer(nn.Module):
@@ -273,7 +273,7 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
         y_pred_prob = y_pred_tensor.cpu().numpy().flatten()
         
     y_pred = (y_pred_prob >= 0.5).astype(int)
-    return y_pred, y_pred_prob
+    return y_pred, y_pred_prob, model # <--- [Modified] Return model
 
 
 ########################
@@ -349,8 +349,9 @@ def main():
         keys_val = [prompt_sent_ids[i] for i in val_indices]
         keys_test = [prompt_sent_ids[i] for i in test_indices]
 
+        pca_model = None
         if args.pca:
-            X_train, X_val, X_test = apply_pca(X_train, X_val, X_test)
+            X_train, X_val, X_test, pca_model = apply_pca(X_train, X_val, X_test) # <--- [Modified] Capture PCA model
         
         logger.debug(f"Training set: {len(X_train)} latents (Safe: {np.sum(y_train==1)}, Unsafe: {np.sum(y_train==0)})")
         logger.debug(f"Validation set: {len(X_val)} latents (Safe: {np.sum(y_val==1)}, Unsafe: {np.sum(y_val==0)})")
@@ -359,8 +360,9 @@ def main():
         ##############################
         ### train safety probes
         ##############################
-        logreg_y_pred, logreg_y_pred_prob = train_logistic_regression(X_train, y_train, X_test, y_test)
-        mlp_y_pred, mlp_y_pred_prob = train_mlp(X_train, y_train, X_val, y_val, X_test, y_test)
+        # [Modified] Capture trained models
+        logreg_y_pred, logreg_y_pred_prob, logreg_model = train_logistic_regression(X_train, y_train, X_test, y_test)
+        mlp_y_pred, mlp_y_pred_prob, mlp_model = train_mlp(X_train, y_train, X_val, y_val, X_test, y_test)
 
         ##############################
         ### random baseline
@@ -381,18 +383,46 @@ def main():
         disagreement = np.sum(y_train != y_train_shuffled)
         disagreement_percentage = (disagreement / len(y_train)) * 100
         total_disagreement_percentage += disagreement_percentage
-        rand_lr_pred, rand_lr_pred_prob = train_logistic_regression(X_train, y_train_shuffled, X_test, y_test)
+        rand_lr_pred, rand_lr_pred_prob, _ = train_logistic_regression(X_train, y_train_shuffled, X_test, y_test)
 
         # eval
-        logreg_eval = eval_pred(y_test, logreg_y_pred, logreg_y_pred_prob, metrics=["f1", "accuracy", "pr_auc"])
-        mlp_eval = eval_pred(y_test, mlp_y_pred, mlp_y_pred_prob, metrics=["f1", "accuracy", "pr_auc"])
-        rand_lr_eval = eval_pred(y_test, rand_lr_pred, rand_lr_pred_prob, metrics=["f1", "accuracy", "pr_auc"])
-        random_eval = eval_pred(y_test, random_y_pred, random_probs, metrics=["f1", "accuracy", "pr_auc"])
-        theory_random_eval = {"f1": positive_prior, "pr_auc": positive_prior}
+        # [Modified] Added "auc_roc" to metrics list
+        eval_metrics = ["f1", "accuracy", "pr_auc", "auc_roc"]
+        logreg_eval = eval_pred(y_test, logreg_y_pred, logreg_y_pred_prob, metrics=eval_metrics)
+        mlp_eval = eval_pred(y_test, mlp_y_pred, mlp_y_pred_prob, metrics=eval_metrics)
+        rand_lr_eval = eval_pred(y_test, rand_lr_pred, rand_lr_pred_prob, metrics=eval_metrics)
+        random_eval = eval_pred(y_test, random_y_pred, random_probs, metrics=eval_metrics)
+        theory_random_eval = {"f1": positive_prior, "pr_auc": positive_prior, "auc_roc": 0.5} # Added theoretical ROC
         always_ones_eval = eval_pred(y_test, always_ones_pred, metrics=["f1", "accuracy"])
         always_ones_eval["pr_auc"] = positive_prior # precision is p and recall is 1
+        always_ones_eval["auc_roc"] = 0.5
         always_zeros_eval = eval_pred(y_test, always_zeros_pred, metrics=["f1", "accuracy"])
         always_zeros_eval["pr_auc"] = 0 # precision is undefined and recall is 0
+        always_zeros_eval["auc_roc"] = 0.5
+
+        # [Modified] Print detailed metrics for model selection
+        logger.info(f"Seed {seed} | LogReg: F1={logreg_eval['f1']:.3f}, Acc={logreg_eval['accuracy']:.3f}, PR-AUC={logreg_eval['pr_auc']:.3f}, ROC-AUC={logreg_eval['auc_roc']:.3f}")
+        logger.info(f"Seed {seed} | MLP: F1={mlp_eval['f1']:.3f}, Acc={mlp_eval['accuracy']:.3f}, PR-AUC={mlp_eval['pr_auc']:.3f}, ROC-AUC={mlp_eval['auc_roc']:.3f}")
+
+        # [Modified] Save models
+        if args.save_models:
+            models_dir = PROBE_OUTPUT_FOLDER / "saved_models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save LogReg
+            lr_path = models_dir / f"logreg_seed{seed}.joblib"
+            joblib.dump(logreg_model, lr_path)
+            
+            # Save MLP (state dict)
+            mlp_path = models_dir / f"mlp_seed{seed}.pth"
+            torch.save(mlp_model.state_dict(), mlp_path)
+            
+            # Save PCA (if exists)
+            if pca_model is not None:
+                pca_path = models_dir / f"pca_seed{seed}.joblib"
+                joblib.dump(pca_model, pca_path)
+            
+            logger.info(f"Models saved to {models_dir} (seed {seed})")
 
         add_to_final_scores(logreg_eval, D_final_logreg_scores, 'logreg')
         add_to_final_scores(mlp_eval, D_final_mlp_scores, 'mlp')
