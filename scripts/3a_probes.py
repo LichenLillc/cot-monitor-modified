@@ -1,27 +1,6 @@
 """
 Trains simple probes (logistic regression and MLPs) to predict safety alignment outcomes from CoT activations.
-
-Models Trained:
-- Logistic Regression: Simple linear classifier with balanced class weights
-- MLP: 2-layer neural network with early stopping and validation
-- Random baselines: For comparison and significance testing
-
-Input data:
-    input_folder/
-    ├── activations/         # PyTorch tensors from 2b_get_activations.py
-    │   ├── 0_0.pt
-    │   ├── 0_1.pt
-    │   └── ...
-    └── labels/              # Safety labels from 2a_evaluate_safety.py
-        ├── 0/
-        │   ├── 0_0_labeled.json
-        │   ├── 0_1_labeled.json
-        │   └── ...
-        └── ...
-
-Output:
-    Prints performance metrics (F1, accuracy, PR-AUC).
-    Optionally saves detailed predictions and training data to TSV files.
+Now includes adjustable Regularization (L2, Dropout, Noise) and Early Stopping via CLI arguments.
 """
 
 import collections
@@ -35,7 +14,7 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, precision_recall_curve, auc, confusion_matrix, classification_report
+from sklearn.metrics import f1_score
 from sklearn.preprocessing import StandardScaler
 import torch.nn as nn
 import torch.optim as optim
@@ -44,12 +23,37 @@ import joblib
 
 from utils import eval_pred, add_to_final_scores, calculate_metrics_stats, save_probe_outputs_tsv
 
+# -----------------------------------------------------------------------------
+# Argument Parsing with Smart Defaults
+# -----------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_folder", type=str, required=True, help="input folder containing activations and labels")
-parser.add_argument("--N_runs", type=int, default=5, help="number of different seeded runs")
+parser.add_argument("--N_runs", type=int, default=1, help="number of different seeded runs")
 parser.add_argument("--sample_K", type=int, default=-1, help="number of training samples")
 parser.add_argument("--pca", action="store_true", help="run PCA")
-parser.add_argument("--pca_components", type=int, default=50, help="number of different seeded runs")
+parser.add_argument("--pca_components", type=int, default=50, help="number of PCA components")
+
+### Regularization & Training Hyperparameters
+# logic: 
+# 1. flag not set -> value is default (usually 0/off)
+# 2. flag set without value -> value is const (recommended for small data)
+# 3. flag set with value -> value is user provided
+
+# L2 Regularization (Weight Decay)
+parser.add_argument('--l2', type=float, nargs='?', const=1e-3, default=0.0,
+                    help='L2 regularization strength (weight decay). Default if flag used: 1e-3')
+
+# Dropout
+parser.add_argument('--dropout', type=float, nargs='?', const=0.3, default=0.0,
+                    help='Dropout rate. Default if flag used: 0.3')
+
+# Gaussian Noise
+parser.add_argument('--noise', type=float, nargs='?', const=0.05, default=0.0,
+                    help='Gaussian noise std dev added to inputs. Default if flag used: 0.05')
+
+# Early Stopping Patience
+parser.add_argument('--patience', type=int, nargs='?', const=5, default=3,
+                    help='Early stopping patience (epochs). Default if flag used: 5. Default if no flag: 2')
 
 ### storing test prediction outputs
 parser.add_argument("--store_outputs", action="store_true", help="whether to store model outputs")
@@ -61,7 +65,9 @@ INPUT_FOLDER = pathlib.Path(args.input_folder)
 PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / INPUT_FOLDER.name
 PROBE_OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
-### load and engineer data
+# -----------------------------------------------------------------------------
+# Data Loading & Preparation
+# -----------------------------------------------------------------------------
 def load_data():
     """
     Load activations and labels from the input folder.
@@ -73,13 +79,11 @@ def load_data():
 
     for act_file in tqdm((INPUT_FOLDER / "activations").glob("*.pt"), desc="Loading activations"):
         filename = os.path.basename(act_file)
-        # key is in the format of "{prompt_id}_{sentence_id}"
         key = filename.split('.')[0]
         activation = torch.load(act_file)
         activations[key] = activation
 
     for label_file in tqdm((INPUT_FOLDER / "labels").rglob("*.json"), desc="Loading labels and texts"):
-        # filename is in the format of "{prompt_id}_{sentence_id}_labeled.json"
         filename = os.path.basename(label_file)
         if filename.endswith("_labeled.json"):
             key = filename.split('.')[0].split('_')[0:2]
@@ -96,7 +100,6 @@ def prepare_data(activations, labels):
     Reformat activations and labels into a single numpy array.
     """
     def convert_to_numpy(tensor):
-        # convert a tensor to numpy, handle bfloat16
         if isinstance(tensor, np.ndarray):
             return tensor
         if tensor.dtype == torch.bfloat16:
@@ -113,10 +116,8 @@ def prepare_data(activations, labels):
     labels_list = []
     prompt_sent_ids = []
 
-    # sanity check: make sure we only process ids that exist in both activations and labels
     assert set(activations.keys()) ==  set(labels.keys()), f"difference: {set(activations.keys()) - set(labels.keys())}"
     for id in activations.keys():
-        # convert to numpy first
         activations_list.append(convert_to_numpy(activations[id]))
         labels_list.append(labels[id]) 
         prompt_sent_ids.append(id)
@@ -126,18 +127,22 @@ def prepare_data(activations, labels):
     return X, labels_np, prompt_sent_ids
 
 def apply_pca(X_train, X_val, X_test):
-    # fit PCA on training data
     pca_components = min(args.pca_components, X_train.shape[0], X_train.shape[1])
     logger.info(f"PCA:::reducing to {pca_components}")
     pca = PCA(n_components=pca_components)
     X_train_pca = pca.fit_transform(X_train)
-    # transform test data using the same PCA
     X_val_pca = pca.transform(X_val)
     X_test_pca = pca.transform(X_test)
     return X_train_pca, X_val_pca, X_test_pca, pca
 
-### logistic regression
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
+
+### Logistic Regression
 def train_logistic_regression(X_train, y_train, X_test, y_test):
+    # LogReg supports L2 via 'C' parameter (inverse of lambda), but keeping it simple here.
+    # If you wanted to link args.l2 to LogReg, you would set C = 1 / (args.l2 + 1e-9)
     model = LogisticRegression(max_iter=1000, class_weight="balanced")
     model.fit(X_train, y_train)
 
@@ -146,20 +151,42 @@ def train_logistic_regression(X_train, y_train, X_test, y_test):
 
     return y_pred, y_pred_prob, model
 
-### MLP
+### MLP Modules
+
+class GaussianNoise(nn.Module):
+    """Adds Gaussian noise to the input during training only."""
+    def __init__(self, std=0.1):
+        super().__init__()
+        self.std = std
+
+    def forward(self, x):
+        if self.training and self.std > 0:
+            return x + torch.randn_like(x) * self.std
+        return x
+
 class CustomMLP2Layer(nn.Module):
-    def __init__(self, input_size, hidden_size1=100, hidden_size2=50):
+    def __init__(self, input_size, hidden_size1=100, hidden_size2=50, dropout_rate=0.0, noise_std=0.0):
         super(CustomMLP2Layer, self).__init__()
+        
+        # Regularization 1: Gaussian Noise on Input
+        self.noise = GaussianNoise(std=noise_std)
+        
         self.fc1 = nn.Linear(input_size, hidden_size1)
         self.relu1 = nn.ReLU()
+        
+        # Regularization 2: Dropout after activation
+        self.dropout = nn.Dropout(p=dropout_rate)
+        
         self.fc2 = nn.Linear(hidden_size1, hidden_size2)
         self.relu2 = nn.ReLU()
         self.fc3 = nn.Linear(hidden_size2, 1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
+        x = self.noise(x)
         x = self.fc1(x)
         x = self.relu1(x)
+        x = self.dropout(x)
         x = self.fc2(x)
         x = self.relu2(x)
         x = self.fc3(x) 
@@ -186,31 +213,37 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
     batch_size = 32
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
     
     input_size = X_train.shape[1]
-    model = CustomMLP2Layer(input_size)
     
-    # calculate class weights for weighted BCE loss
-    num_pos = np.sum(y_train)  # number of 1s
-    num_neg = len(y_train) - num_pos  # number of 0s
-
+    # Initialize model with arguments for regularization
+    model = CustomMLP2Layer(
+        input_size, 
+        dropout_rate=args.dropout, 
+        noise_std=args.noise
+    )
+    
+    # Calculate class weights
+    num_pos = np.sum(y_train)
+    num_neg = len(y_train) - num_pos
     if num_pos < num_neg:
-        # class 1 is minority - upweight class 1
         pos_weight = torch.FloatTensor([num_neg / num_pos])
         minority_class = 1
     else:
-        # class 0 is minority - upweight class 0  
         pos_weight = torch.FloatTensor([num_pos / num_neg])
         minority_class = 0
+        
     criterion = nn.BCELoss(reduction='none')
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    # training loop
+    # Regularization 3: L2 (Weight Decay) in Optimizer
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=args.l2)
+    
     num_epochs = 50
     best_f1 = 0
     best_model_state = None
-    patience = 5
+    
+    # Regularization 4: Configurable Early Stopping
+    patience = args.patience
     patience_counter = 0
     
     for epoch in range(num_epochs):
@@ -231,7 +264,7 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
             running_loss += loss.item() * inputs.size(0)
         epoch_loss = running_loss / len(train_loader.dataset)
         
-        # validation
+        # Validation
         model.eval()
         y_pred = []
         y_true = []
@@ -245,7 +278,6 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
         y_pred = np.array(y_pred).flatten()
         y_true = np.array(y_true).flatten()
         
-        # convert to binary
         y_pred_binary = (y_pred >= 0.5).astype(int)
         val_f1 = f1_score(y_true, y_pred_binary, average="binary")
         
@@ -257,7 +289,7 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
             patience_counter += 1
             
         if patience_counter >= patience:
-            print(f"Early stopping at epoch {epoch+1}")
+            print(f"Early stopping at epoch {epoch+1} (Patience: {patience})")
             break
             
         if (epoch + 1) % 5 == 0:
@@ -266,58 +298,56 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
     
-    # test
+    # Test
     model.eval()
     with torch.no_grad():
         y_pred_tensor = model(X_test_tensor)
         y_pred_prob = y_pred_tensor.cpu().numpy().flatten()
         
     y_pred = (y_pred_prob >= 0.5).astype(int)
-    return y_pred, y_pred_prob, model
+    
+    return y_pred, y_pred_prob, model, scaler
 
-
-########################
-######## main ##########
-########################
+# -----------------------------------------------------------------------------
+# Main Execution
+# -----------------------------------------------------------------------------
 def main():
     activations_dict, prompts_dict, cots_dict, labels_dict = load_data()
     
-    # get train-test split based on prompt IDs
     prompt_IDs = set([x.split("_")[0] for x in activations_dict.keys()])
     N = len(prompt_IDs)
     logger.debug(f"Loaded {len(activations_dict)=} activations of last-token CoTs for {N=} prompts.")
+    
+    # Report configuration
+    logger.info(f"Configuration -> L2: {args.l2}, Dropout: {args.dropout}, Noise: {args.noise}, Patience: {args.patience}")
 
-    # initialize lists to store results across all runs
     D_final_logreg_scores = collections.defaultdict(list)
     D_final_mlp_scores = collections.defaultdict(list)
     D_final_rand_lr_scores = collections.defaultdict(list)
     D_final_random_scores = collections.defaultdict(list)
+    D_final_theoretical_random_scores = collections.defaultdict(list)
     D_final_always_ones_scores = collections.defaultdict(list)
     D_final_always_zeros_scores = collections.defaultdict(list)
-    D_final_theoretical_random_scores = collections.defaultdict(list)
     total_disagreement_percentage = 0
     
-    # [New] List to store per-seed metrics
     seed_results = []
 
     for seed in range(args.N_runs):
-        np.random.seed(seed)  # for reproducibility
+        np.random.seed(seed)
+        torch.manual_seed(seed) # Ensure torch is also seeded
+        
         train_prompt_ids = set(np.random.choice(sorted(list(prompt_IDs)), int(0.7 * N), replace=False))
         test_prompt_ids = prompt_IDs - train_prompt_ids
         print(f"Selected {len(train_prompt_ids)} prompts for training and {len(test_prompt_ids)} for testing")
         
-        # split train_prompt_ids into train and validation sets (90:10 split)
         train_prompt_ids_list = list(train_prompt_ids)
         np.random.shuffle(train_prompt_ids_list)
         split_idx = int(0.9 * len(train_prompt_ids_list))
         train_prompt_ids = set(train_prompt_ids_list[:split_idx])
         val_prompt_ids = set(train_prompt_ids_list[split_idx:])
-        logger.debug(f"Train prompts: {len(train_prompt_ids)}, Val prompts: {len(val_prompt_ids)}, Test prompts: {len(test_prompt_ids)}")
         
-        # prepare data for this iteration
         X, labels_np, prompt_sent_ids  = prepare_data(activations_dict, labels_dict)
-        logger.info(f"Checking X matrix stats: Mean={np.mean(X):.4f}, Max={np.max(X):.4f}, Min={np.min(X):.4f}")
-        logger.info(f"Is X all zeros? {np.all(X == 0)}")
+        
         train_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in train_prompt_ids]
         val_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in val_prompt_ids]
         test_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in test_prompt_ids]
@@ -334,50 +364,41 @@ def main():
         X_val = X[val_indices]
         X_test = X[test_indices]
 
-        # convert scores to binary classes
+        global_scaler = StandardScaler()
+        X_train = global_scaler.fit_transform(X_train)
+        X_val = global_scaler.transform(X_val)
+        X_test = global_scaler.transform(X_test)
+
         threshold = 0.5
         y_train = (labels_np[train_indices] >= threshold).astype(int) 
         y_val = (labels_np[val_indices] >= threshold).astype(int)
         y_test = (labels_np[test_indices] >= threshold).astype(int)
 
-        # current labels: safe -> 0; unsafe -> 1
-        # flip labels if safe is rarer
         if (y_test == 0).sum() < (y_test == 1).sum():
             logger.info("Flipping labels (0->1, 1->0) so unsafe -> 0, safe (rarer) -> 1")
             y_train = 1 - y_train
             y_val = 1 - y_val
             y_test = 1 - y_test
 
-        keys_train = [prompt_sent_ids[i] for i in train_indices]
-        keys_val = [prompt_sent_ids[i] for i in val_indices]
         keys_test = [prompt_sent_ids[i] for i in test_indices]
 
         pca_model = None
         if args.pca:
             X_train, X_val, X_test, pca_model = apply_pca(X_train, X_val, X_test)
         
-        logger.debug(f"Training set: {len(X_train)} latents (Safe: {np.sum(y_train==1)}, Unsafe: {np.sum(y_train==0)})")
-        logger.debug(f"Validation set: {len(X_val)} latents (Safe: {np.sum(y_val==1)}, Unsafe: {np.sum(y_val==0)})")
-        logger.debug(f"Testing set: {len(X_test)} latents (Safe: {np.sum(y_test==1)}, Unsafe: {np.sum(y_test==0)})")
-
-        ##############################
-        ### train safety probes
-        ##############################
+        # Train Probes
         logreg_y_pred, logreg_y_pred_prob, logreg_model = train_logistic_regression(X_train, y_train, X_test, y_test)
-        mlp_y_pred, mlp_y_pred_prob, mlp_model = train_mlp(X_train, y_train, X_val, y_val, X_test, y_test)
+        mlp_y_pred, mlp_y_pred_prob, mlp_model, mlp_internal_scaler = train_mlp(X_train, y_train, X_val, y_val, X_test, y_test)
 
-        ##############################
-        ### random baseline
-        ##############################
-        np.random.seed(seed)  # use same seed as outer loop for reproducibility
+        # Random Baseline
+        np.random.seed(seed)
         positive_prior = np.sum(y_train == 1)/len(y_train)
         random_probs = np.random.uniform(0, 1, size=len(X_test))
         random_y_pred = (random_probs < positive_prior).astype(int)
         always_ones_pred = np.ones(len(X_test))
         always_zeros_pred = np.zeros(len(X_test))
 
-        # shuffle
-        np.random.seed(seed)  # use same seed as outer loop for reproducibility
+        np.random.seed(seed)
         shuffled_indices = np.arange(len(y_train))
         np.random.shuffle(shuffled_indices)
         y_train_shuffled = y_train[shuffled_indices]
@@ -387,7 +408,7 @@ def main():
         total_disagreement_percentage += disagreement_percentage
         rand_lr_pred, rand_lr_pred_prob, _ = train_logistic_regression(X_train, y_train_shuffled, X_test, y_test)
 
-        # eval
+        # Eval
         eval_metrics = ["f1", "accuracy", "pr_auc", "auc_roc"]
         logreg_eval = eval_pred(y_test, logreg_y_pred, logreg_y_pred_prob, metrics=eval_metrics)
         mlp_eval = eval_pred(y_test, mlp_y_pred, mlp_y_pred_prob, metrics=eval_metrics)
@@ -401,32 +422,22 @@ def main():
         always_zeros_eval["pr_auc"] = 0 
         always_zeros_eval["auc_roc"] = 0.5
 
-        # [New] Collect metrics for final summary table
         seed_results.append({
             "seed": seed,
             "logreg": logreg_eval,
             "mlp": mlp_eval
         })
 
-        # Save models
         if args.save_models:
             models_dir = PROBE_OUTPUT_FOLDER / "saved_models"
             models_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Save LogReg
-            lr_path = models_dir / f"logreg_seed{seed}.joblib"
-            joblib.dump(logreg_model, lr_path)
-            
-            # Save MLP (state dict)
-            mlp_path = models_dir / f"mlp_seed{seed}.pth"
-            torch.save(mlp_model.state_dict(), mlp_path)
-            
-            # Save PCA (if exists)
+            joblib.dump(logreg_model, models_dir / f"logreg_seed{seed}.joblib")
+            torch.save(mlp_model.state_dict(), models_dir / f"mlp_seed{seed}.pth")
+            joblib.dump(global_scaler, models_dir / f"global_scaler_seed{seed}.joblib")
+            joblib.dump(mlp_internal_scaler, models_dir / f"mlp_internal_scaler_seed{seed}.joblib")
             if pca_model is not None:
-                pca_path = models_dir / f"pca_seed{seed}.joblib"
-                joblib.dump(pca_model, pca_path)
-            
-            logger.info(f"Models saved to {models_dir} (seed {seed})")
+                joblib.dump(pca_model, models_dir / f"pca_seed{seed}.joblib")
+            logger.info(f"Models and Scalers saved to {models_dir} (seed {seed})")
 
         add_to_final_scores(logreg_eval, D_final_logreg_scores, 'logreg')
         add_to_final_scores(mlp_eval, D_final_mlp_scores, 'mlp')
@@ -436,39 +447,13 @@ def main():
         add_to_final_scores(always_ones_eval, D_final_always_ones_scores, "always_ones")
         add_to_final_scores(always_zeros_eval, D_final_always_zeros_scores, "always_zeros")
         
-        ##############################
-        #### save test outputs
-        ##############################
         if args.store_outputs:
             test_text_prompts = [prompts_dict[key] for key in keys_test]
             test_text_cots = [cots_dict[key] for key in keys_test]
-
-            save_probe_outputs_tsv(
-                output_dir=PROBE_OUTPUT_FOLDER,
-                probe_name=f"logreg_seed{seed}",
-                prompt_sent_ids=keys_test,
-                prompts=test_text_prompts,
-                cots=test_text_cots,
-                true_labels=y_test,
-                pred_labels=logreg_y_pred,
-                pred_probs=logreg_y_pred_prob
-            )
-            
-            save_probe_outputs_tsv(
-                output_dir=PROBE_OUTPUT_FOLDER,
-                probe_name=f"mlp_seed{seed}",
-                prompt_sent_ids=keys_test,
-                prompts=test_text_prompts,
-                cots=test_text_cots,
-                true_labels=y_test,
-                pred_labels=mlp_y_pred,
-                pred_probs=mlp_y_pred_prob
-            )
+            save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"logreg_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, logreg_y_pred, logreg_y_pred_prob)
+            save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, mlp_y_pred, mlp_y_pred_prob)
 
     print(f"---- mean disagreement after shuffling: {total_disagreement_percentage/args.N_runs:.2f}%")
-    print(f"(N_train: {len(train_indices)}. N_test: {len(test_indices)})")
-
-    # [New] Print Per-Seed Summary Table
     print("\n" + "="*85)
     print(f"PER-SEED PERFORMANCE SUMMARY")
     print("="*85)
@@ -476,10 +461,8 @@ def main():
     print("-" * 85)
     for res in seed_results:
         s = res['seed']
-        # LogReg row
         lr = res['logreg']
         print(f"{s:<5} | {'LogReg':<8} | {lr['f1']:.4f}   | {lr['accuracy']:.4f}   | {lr['pr_auc']:.4f}   | {lr['auc_roc']:.4f}")
-        # MLP row
         mlp = res['mlp']
         print(f"{'':<5} | {'MLP':<8} | {mlp['f1']:.4f}   | {mlp['accuracy']:.4f}   | {mlp['pr_auc']:.4f}   | {mlp['auc_roc']:.4f}")
         print("-" * 85)
@@ -494,7 +477,6 @@ def main():
         D_final_always_ones_scores,
         D_final_always_zeros_scores
     ]))
-
 
 if __name__ == "__main__":
     main()
