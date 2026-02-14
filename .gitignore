@@ -3,9 +3,9 @@ __pycache__
 *.json
 *.jsonl
 
-/*/*
-!/**/.gitkeep
-!/scripts/**
+/*/
+!/scripts/
+!/data/.gitkeep
 
 !.gitignore
 !README.md
