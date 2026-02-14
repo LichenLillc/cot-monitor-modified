@@ -1,6 +1,7 @@
 """
 Trains simple probes (logistic regression and MLPs) to predict safety alignment outcomes from CoT activations.
 Now includes adjustable Regularization (L2, Dropout, Noise) and Early Stopping via CLI arguments.
+Now supports merging multiple input folders for training.
 """
 
 import collections
@@ -20,6 +21,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import joblib
+import re
 
 from utils import eval_pred, add_to_final_scores, calculate_metrics_stats, save_probe_outputs_tsv
 
@@ -27,31 +29,21 @@ from utils import eval_pred, add_to_final_scores, calculate_metrics_stats, save_
 # Argument Parsing with Smart Defaults
 # -----------------------------------------------------------------------------
 parser = argparse.ArgumentParser()
-parser.add_argument("--input_folder", type=str, required=True, help="input folder containing activations and labels")
-parser.add_argument("--N_runs", type=int, default=1, help="number of different seeded runs")
+# CHANGE: nargs='+' allows multiple arguments
+parser.add_argument("--input_folder", type=str, nargs='+', required=True, 
+                    help="input folder(s) containing activations and labels")
+parser.add_argument("--N_runs", type=int, default=5, help="number of different seeded runs")
 parser.add_argument("--sample_K", type=int, default=-1, help="number of training samples")
 parser.add_argument("--pca", action="store_true", help="run PCA")
 parser.add_argument("--pca_components", type=int, default=50, help="number of PCA components")
 
 ### Regularization & Training Hyperparameters
-# logic: 
-# 1. flag not set -> value is default (usually 0/off)
-# 2. flag set without value -> value is const (recommended for small data)
-# 3. flag set with value -> value is user provided
-
-# L2 Regularization (Weight Decay)
 parser.add_argument('--l2', type=float, nargs='?', const=1e-3, default=0.0,
                     help='L2 regularization strength (weight decay). Default if flag used: 1e-3')
-
-# Dropout
 parser.add_argument('--dropout', type=float, nargs='?', const=0.3, default=0.0,
                     help='Dropout rate. Default if flag used: 0.3')
-
-# Gaussian Noise
 parser.add_argument('--noise', type=float, nargs='?', const=0.05, default=0.0,
                     help='Gaussian noise std dev added to inputs. Default if flag used: 0.05')
-
-# Early Stopping Patience
 parser.add_argument('--patience', type=int, nargs='?', const=5, default=3,
                     help='Early stopping patience (epochs). Default if flag used: 5. Default if no flag: 2')
 
@@ -61,38 +53,84 @@ parser.add_argument("--probe_output_folder", type=str, default="../probe_outputs
 parser.add_argument("--save_models", action="store_true", help="whether to save trained models and PCA objects")
 
 args = parser.parse_args()
-INPUT_FOLDER = pathlib.Path(args.input_folder)
-PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / INPUT_FOLDER.name
+
+# CHANGE: Handle multiple input folders for output naming
+input_paths = [pathlib.Path(p) for p in args.input_folder]
+if len(input_paths) == 1:
+    out_dir_name = input_paths[0].name
+else:
+    # If multiple datasets, create a combined name (or simplified one)
+    folder_names = [p.name for p in input_paths]
+    if len(folder_names) > 3:
+        out_dir_name = f"Combined_{len(folder_names)}_Datasets"
+    else:
+        out_dir_name = "+".join(folder_names)
+    # Sanitize name
+    out_dir_name = re.sub(r'[^\w\-.+]', '_', out_dir_name)
+
+PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / out_dir_name
 PROBE_OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------------------------------------------------------
 # Data Loading & Preparation
 # -----------------------------------------------------------------------------
-def load_data():
+def load_data(input_folders):
     """
-    Load activations and labels from the input folder.
+    Load activations and labels from LIST of input folders.
+    Merges them while ensuring keys remain unique per dataset.
     """
     activations = dict()
     labels = dict()
     prompts = {}
     cots = {}
 
-    for act_file in tqdm((INPUT_FOLDER / "activations").glob("*.pt"), desc="Loading activations"):
-        filename = os.path.basename(act_file)
-        key = filename.split('.')[0]
-        activation = torch.load(act_file)
-        activations[key] = activation
+    for folder in input_folders:
+        folder_path = pathlib.Path(folder)
+        # We use the folder name to namespace the keys.
+        # Replacing '_' with '-' in folder name to ensure it doesn't break the split('_') logic later.
+        dataset_prefix = folder_path.name.replace("_", "-")
+        
+        logger.info(f"Loading data from: {folder_path} (Prefix: {dataset_prefix})")
 
-    for label_file in tqdm((INPUT_FOLDER / "labels").rglob("*.json"), desc="Loading labels and texts"):
-        filename = os.path.basename(label_file)
-        if filename.endswith("_labeled.json"):
-            key = filename.split('.')[0].split('_')[0:2]
-            key = '_'.join(key)
-            with open(label_file, 'r') as f:
-                data = json.load(f)
-                labels[key] = data["safety_label"]["score"]
-                prompts[key] = data.get("prompt", "")
-                cots[key] = data.get("cot", "")
+        # 1. Load Activations
+        act_files = list((folder_path / "activations").glob("*.pt"))
+        for act_file in tqdm(act_files, desc=f"Activations {folder_path.name}"):
+            filename = os.path.basename(act_file)
+            original_key = filename.split('.')[0] # e.g., "123_0"
+            
+            # Split to inject dataset prefix: "123_0" -> "123" and "0"
+            parts = original_key.split('_')
+            if len(parts) >= 2:
+                prompt_id = parts[0]
+                cot_id = "_".join(parts[1:]) # Handle cases if cot_id has underscores, though unlikely
+                
+                # New Key: "123-DatasetName_0". 
+                # This ensures split('_')[0] returns "123-DatasetName", keeping prompts unique per dataset.
+                new_key = f"{prompt_id}-{dataset_prefix}_{cot_id}"
+                
+                activation = torch.load(act_file)
+                activations[new_key] = activation
+
+        # 2. Load Labels
+        label_files = list((folder_path / "labels").rglob("*.json"))
+        for label_file in tqdm(label_files, desc=f"Labels {folder_path.name}"):
+            filename = os.path.basename(label_file)
+            if filename.endswith("_labeled.json"):
+                # Original extraction: "123_0_labeled.json" -> "123_0"
+                original_key_parts = filename.split('.')[0].split('_')[0:2]
+                
+                prompt_id = original_key_parts[0]
+                cot_id = original_key_parts[1]
+                
+                # Construct same new key
+                new_key = f"{prompt_id}-{dataset_prefix}_{cot_id}"
+                
+                with open(label_file, 'r') as f:
+                    data = json.load(f)
+                    labels[new_key] = data["safety_label"]["score"]
+                    prompts[new_key] = data.get("prompt", "")
+                    cots[new_key] = data.get("cot", "")
+    
     return activations, prompts, cots, labels
 
 def prepare_data(activations, labels):
@@ -116,8 +154,15 @@ def prepare_data(activations, labels):
     labels_list = []
     prompt_sent_ids = []
 
-    assert set(activations.keys()) ==  set(labels.keys()), f"difference: {set(activations.keys()) - set(labels.keys())}"
-    for id in activations.keys():
+    # Check for consistency
+    common_keys = set(activations.keys()) & set(labels.keys())
+    if len(common_keys) != len(activations):
+        logger.warning(f"Mismatch: {len(activations)} activations, {len(labels)} labels. Using intersection {len(common_keys)}.")
+    
+    # Sort for deterministic order before shuffling later
+    sorted_keys = sorted(list(common_keys))
+
+    for id in sorted_keys:
         activations_list.append(convert_to_numpy(activations[id]))
         labels_list.append(labels[id]) 
         prompt_sent_ids.append(id)
@@ -141,8 +186,6 @@ def apply_pca(X_train, X_val, X_test):
 
 ### Logistic Regression
 def train_logistic_regression(X_train, y_train, X_test, y_test):
-    # LogReg supports L2 via 'C' parameter (inverse of lambda), but keeping it simple here.
-    # If you wanted to link args.l2 to LogReg, you would set C = 1 / (args.l2 + 1e-9)
     model = LogisticRegression(max_iter=1000, class_weight="balanced")
     model.fit(X_train, y_train)
 
@@ -292,8 +335,9 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
             print(f"Early stopping at epoch {epoch+1} (Patience: {patience})")
             break
             
-        if (epoch + 1) % 5 == 0:
-            print(f'Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.4f}, Val F1: {val_f1:.4f}')
+        # Optional: reduce verbosity if running many seeds
+        # if (epoch + 1) % 5 == 0:
+        #    print(f'Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.4f}, Val F1: {val_f1:.4f}')
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
@@ -312,14 +356,18 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
 # Main Execution
 # -----------------------------------------------------------------------------
 def main():
-    activations_dict, prompts_dict, cots_dict, labels_dict = load_data()
+    # CHANGE: input_paths is passed to load_data
+    activations_dict, prompts_dict, cots_dict, labels_dict = load_data(input_paths)
     
+    # Key logic: x.split("_")[0] now returns "PromptID-DatasetName"
+    # This keeps prompts unique per dataset, preserving the logic of splitting by prompt.
     prompt_IDs = set([x.split("_")[0] for x in activations_dict.keys()])
     N = len(prompt_IDs)
-    logger.debug(f"Loaded {len(activations_dict)=} activations of last-token CoTs for {N=} prompts.")
+    logger.debug(f"Loaded {len(activations_dict)=} activations. Total unique Prompt-Dataset pairs: {N}")
     
     # Report configuration
     logger.info(f"Configuration -> L2: {args.l2}, Dropout: {args.dropout}, Noise: {args.noise}, Patience: {args.patience}")
+    logger.info(f"Output Folder: {PROBE_OUTPUT_FOLDER}")
 
     D_final_logreg_scores = collections.defaultdict(list)
     D_final_mlp_scores = collections.defaultdict(list)
@@ -334,11 +382,11 @@ def main():
 
     for seed in range(args.N_runs):
         np.random.seed(seed)
-        torch.manual_seed(seed) # Ensure torch is also seeded
+        torch.manual_seed(seed) 
         
         train_prompt_ids = set(np.random.choice(sorted(list(prompt_IDs)), int(0.7 * N), replace=False))
         test_prompt_ids = prompt_IDs - train_prompt_ids
-        print(f"Selected {len(train_prompt_ids)} prompts for training and {len(test_prompt_ids)} for testing")
+        print(f"Seed {seed}: Selected {len(train_prompt_ids)} prompts for training and {len(test_prompt_ids)} for testing")
         
         train_prompt_ids_list = list(train_prompt_ids)
         np.random.shuffle(train_prompt_ids_list)
@@ -348,6 +396,7 @@ def main():
         
         X, labels_np, prompt_sent_ids  = prepare_data(activations_dict, labels_dict)
         
+        # logic: split by prompt ID (which now includes dataset origin)
         train_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in train_prompt_ids]
         val_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in val_prompt_ids]
         test_indices = [i for i, key in enumerate(prompt_sent_ids) if key.split('_')[0] in test_prompt_ids]
@@ -374,11 +423,11 @@ def main():
         y_val = (labels_np[val_indices] >= threshold).astype(int)
         y_test = (labels_np[test_indices] >= threshold).astype(int)
 
-        if (y_test == 0).sum() < (y_test == 1).sum():
-            logger.info("Flipping labels (0->1, 1->0) so unsafe -> 0, safe (rarer) -> 1")
-            y_train = 1 - y_train
-            y_val = 1 - y_val
-            y_test = 1 - y_test
+        # if (y_test == 0).sum() < (y_test == 1).sum():
+        #     logger.info("Flipping labels (0->1, 1->0) so unsafe -> 0, safe (rarer) -> 1")
+        #     y_train = 1 - y_train
+        #     y_val = 1 - y_val
+        #     y_test = 1 - y_test
 
         keys_test = [prompt_sent_ids[i] for i in test_indices]
 
@@ -453,22 +502,32 @@ def main():
             save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"logreg_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, logreg_y_pred, logreg_y_pred_prob)
             save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, mlp_y_pred, mlp_y_pred_prob)
 
-    print(f"---- mean disagreement after shuffling: {total_disagreement_percentage/args.N_runs:.2f}%")
-    print("\n" + "="*85)
-    print(f"PER-SEED PERFORMANCE SUMMARY")
-    print("="*85)
-    print(f"{'Seed':<5} | {'Model':<8} | {'F1':<8} | {'Acc':<8} | {'PR-AUC':<8} | {'ROC-AUC':<8}")
-    print("-" * 85)
+
+    output_lines = []
+
+    def record(text):
+        """Helper to print to console AND append to log list"""
+        print(text)
+        output_lines.append(str(text))
+
+    record(f"---- mean disagreement after shuffling: {total_disagreement_percentage/args.N_runs:.2f}%")
+    record("\n" + "="*85)
+    record(f"PER-SEED PERFORMANCE SUMMARY")
+    record("="*85)
+    record(f"{'Seed':<5} | {'Model':<8} | {'F1':<8} | {'Acc':<8} | {'PR-AUC':<8} | {'ROC-AUC':<8}")
+    record("-" * 85)
+    
     for res in seed_results:
         s = res['seed']
         lr = res['logreg']
-        print(f"{s:<5} | {'LogReg':<8} | {lr['f1']:.4f}   | {lr['accuracy']:.4f}   | {lr['pr_auc']:.4f}   | {lr['auc_roc']:.4f}")
+        record(f"{s:<5} | {'LogReg':<8} | {lr['f1']:.4f}   | {lr['accuracy']:.4f}   | {lr['pr_auc']:.4f}   | {lr['auc_roc']:.4f}")
         mlp = res['mlp']
-        print(f"{'':<5} | {'MLP':<8} | {mlp['f1']:.4f}   | {mlp['accuracy']:.4f}   | {mlp['pr_auc']:.4f}   | {mlp['auc_roc']:.4f}")
-        print("-" * 85)
-    print("="*85 + "\n")
+        record(f"{'':<5} | {'MLP':<8} | {mlp['f1']:.4f}   | {mlp['accuracy']:.4f}   | {mlp['pr_auc']:.4f}   | {mlp['auc_roc']:.4f}")
+        record("-" * 85)
+    record("="*85 + "\n")
 
-    print(calculate_metrics_stats([
+    # Capture the final aggregated stats string instead of printing directly
+    stats_output = calculate_metrics_stats([
         D_final_logreg_scores,
         D_final_mlp_scores,
         D_final_rand_lr_scores,
@@ -476,7 +535,15 @@ def main():
         D_final_theoretical_random_scores,
         D_final_always_ones_scores,
         D_final_always_zeros_scores
-    ]))
+    ])
+    record(stats_output)
+
+    # Save to file in the same directory as saved_models
+    summary_path = PROBE_OUTPUT_FOLDER / "training_summary.txt"
+    with open(summary_path, "w") as f:
+        f.write("\n".join(output_lines))
+    
+    logger.info(f"Full training summary saved to: {summary_path}")
 
 if __name__ == "__main__":
     main()

@@ -32,7 +32,7 @@ def parse_arguments():
     # 定义互斥参数组，确保三个参数只能出现一个
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--cot", action="store_true", help="Keep only Chain-of-Thought (remove all code blocks).")
-    group.add_argument("--answer", action="store_true", help="Keep only the LAST Answer (remove CoT and other code blocks).")
+    group.add_argument("--answer", '-a', action="store_true", help="Keep only the LAST Answer (remove CoT and other code blocks).")
     group.add_argument("--reformat", action="store_true", help="Reformat: Move all Answers to the end of the response.")
 
     return parser.parse_args()

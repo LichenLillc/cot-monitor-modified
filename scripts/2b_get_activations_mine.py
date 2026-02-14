@@ -3,9 +3,9 @@ Extracts activations from language models at specific layers and token positions
 These activations will be used to train probes. 
 
 Process:
-1. Load the model (FP16 by default, or 4-bit if --quantize_4bit is specified)
-2. Iterate through the directory structure (compatible with 1_2_converter.py outputs)
-3. For each sample:
+1. Scan directory to identify missing activations (Pre-check).
+2. Load the model ONLY if there are files to process.
+3. Iterate through the missing files:
    - Concatenate prompt + final_answer (No CoT, No Sentinel)
    - Extract hidden states from specified layer (Last Token)
    - Save activation as PyTorch tensor
@@ -23,18 +23,18 @@ import argparse
 import os
 import numpy as np
 from loguru import logger
+import sys
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--results_folder", type=str, required=True, help="Path to input folder containing json files (e.g., processed/dataset/labels)")
+parser.add_argument("--results_folder", type=str, required=True, help="Path to input folder containing json files (e.g., processed/dataset)")
 parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Coder-1.5B-Instruct", help="Model to use for activation extraction")
 parser.add_argument("--activation_layer", type=int, default=-1, help="Which layer to extract activations from (default: last layer)")
-parser.add_argument("--activations_dir", type=str, required=True, help="Directory to store activation tensors")
 parser.add_argument("--quantize_4bit", action="store_true", help="Enable 4-bit quantization (Use this for large models like 7B+, but NOT recommended for 1.5B)")
 
 args = parser.parse_args()
 MODEL_NAME = args.model_name
-INPUT_FOLDER = pathlib.Path(args.results_folder)
-ACT_DIR = pathlib.Path(args.activations_dir)
+INPUT_FOLDER = pathlib.Path(args.results_folder).joinpath("labels")
+ACT_DIR = pathlib.Path(args.results_folder).joinpath("activations")
 ACT_DIR.mkdir(parents=True, exist_ok=True)
 
 logger.info(f"Save activations to {ACT_DIR}")
@@ -62,7 +62,45 @@ def extract_last_token_activation(text_input, hf_model, hf_tok, layer_idx=args.a
     return last_token_activation
 
 #######################
-# Load model
+# 1. Pre-scan Files (MOVED UP)
+#######################
+logger.info("Scanning files to check for existing activations...")
+todo_tasks = [] # List of (json_path, output_pt_path)
+
+# Using exact same logic as original script for filtering
+for prompt_id_folder in INPUT_FOLDER.glob("*"):
+    if not prompt_id_folder.is_dir():
+        continue
+        
+    for fp in prompt_id_folder.glob("*.json"):
+        # Skip labeled files
+        if "labeled" in fp.stem: continue
+
+        # Filename format check
+        try:
+            prompt_idx, accum_cot_idx = fp.stem.split("_")
+        except ValueError:
+            logger.warning(f"Skipping file with unexpected name format: {fp.name}")
+            continue
+
+        activation_path = ACT_DIR / f"{prompt_idx}_{accum_cot_idx}.pt"
+        
+        # Check existence
+        if activation_path.exists():
+            continue
+        
+        # Add to todo list
+        todo_tasks.append((fp, activation_path))
+
+# Check if we need to proceed
+if len(todo_tasks) == 0:
+    logger.success("All activations already exist. Exiting without loading model.")
+    sys.exit(0)
+
+logger.info(f"Found {len(todo_tasks)} files to process.")
+
+#######################
+# 2. Load model (Only if needed)
 #######################
 if args.quantize_4bit:
     logger.info(f"Loading {MODEL_NAME} in 4-bit Quantization mode...")
@@ -90,53 +128,28 @@ if hf_tok.pad_token is None:
     hf_tok.pad_token = hf_tok.eos_token
 
 #######################
-# Collect activations
+# 3. Collect activations
 #######################
-# We iterate through the folder structure: INPUT_FOLDER / {prompt_id} / {file}.json
-# This matches the structure created by 1_2_converter.py
-for prompt_id_folder in tqdm(INPUT_FOLDER.glob("*"), desc="going through prompt_ids.."):
-    if not prompt_id_folder.is_dir():
-        continue
+# Iterate through the identified tasks
+for fp, activation_path in tqdm(todo_tasks, desc="Extracting activations"):
+    
+    with open(fp, 'r') as f:
+        item = json.load(f)
         
-    for fp in prompt_id_folder.glob("*.json"):
-        # Skip labeled files, we only need the base json
-        if "labeled" in fp.stem: continue
-
-        # Filename format expected: {prompt_idx}_{cot_idx}.json (e.g., 0_0.json)
-        try:
-            prompt_idx, accum_cot_idx = fp.stem.split("_")
-        except ValueError:
-            logger.warning(f"Skipping file with unexpected name format: {fp.name}")
-            continue
-
-        activation_path = ACT_DIR / f"{prompt_idx}_{accum_cot_idx}.pt"
-        if activation_path.exists():
-            # logger.info(f"skipping {activation_path} as it already exists")
-            continue
-
-        with open(fp, 'r') as f:
-            item = json.load(f)
-            
-            # Logic for Scheme 2 (Last Token of Response)
-            # We read 'final_answer' because 'cot' is empty in our new pipeline.
-            response_content = item.get("final_answer", "")
-            
-            # Direct concatenation. 
-            # item["prompt"] already includes the Chat Template.
-            full_text = item["prompt"] + response_content
-            
-            # No sentinel added here.
-
-        try:
-            activation = extract_last_token_activation(full_text, hf_model, hf_tok)
-            torch.save(activation, activation_path)
-        except RuntimeError as e:
-            if "out of memory" in str(e):
-                logger.error(f"OOM error processing {fp.name}. Skipping.")
-                torch.cuda.empty_cache()
-            else:
-                logger.error(f"Runtime error processing {fp.name}: {e}")
-        except Exception as e:
-            logger.error(f"Error processing {fp.name}: {e}")
+        # Logic for Scheme 2 (Last Token of Response)
+        response_content = item.get("final_answer", "")
+        full_text = item["prompt"] + response_content
+        
+    try:
+        activation = extract_last_token_activation(full_text, hf_model, hf_tok)
+        torch.save(activation, activation_path)
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            logger.error(f"OOM error processing {fp.name}. Skipping.")
+            torch.cuda.empty_cache()
+        else:
+            logger.error(f"Runtime error processing {fp.name}: {e}")
+    except Exception as e:
+        logger.error(f"Error processing {fp.name}: {e}")
 
 logger.success("Done extracting activations.")
