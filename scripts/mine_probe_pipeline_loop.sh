@@ -8,7 +8,7 @@
 INPUT_DIR="../data/_main_table_debug/"
 RAW_OUT_DIR="../probe_main-table_debug/raw_outputs/"
 PROCESSED_DIR="../probe_main-table_debug/processed/"
-PROBE_OUT_DIR="../probe_main-table_debug/probe_outputs"
+PROBE_OUT_DIR="../probe_main-table_debug/probe_outputs_v2/"  # changed from probe_outputs to probe_outputs_v2 to avoid confusion with previous runs
 
 # 2. 模型列表 (格式: "ACT_SUF|MODEL_NAME")
 # 使用数组定义，方便添加多个模型
@@ -34,6 +34,13 @@ STEP4_WHITELIST=(
     "7b_pfc_think-ins_cot_ln500-tn500-sh900"
     "7b_pfc_think-ins_cot_ln900-sh900"
     "7b_pfc_think-ins_cot_tn900-sh900"
+    "wild_cot_dup1_ln200_tn200_leh400"
+    "wild_cot_dup1_ln800_tn800_luh600_tuh600_leh400_lehscr21"
+    "wild_cot_dup1_ln800_tn800_luh600_tuh600_leh400"
+    "wild_cot_dup1_ln800_tn800_luh800_tuh800"
+    "wild_cot_dup1_tn400_leh400"
+    "wild_cot_dup1_tn1600_luh800_tuh800"
+    "wild_cot_dup1_tn1600_luh1600"
 )
 
 # ==============================================================================
@@ -124,6 +131,9 @@ for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
                 --input_folder "$ACT_OUTPUT_DIR" \
                 --probe_output_folder "${PROBE_OUT_DIR}/${ACT_SUF}" \
                 --N_runs 30 \
+                --dropout 0.3 \
+                --patience 10 \
+                --l2 1e-4 \
                 --pca \
                 --save_models
         else
@@ -135,3 +145,17 @@ for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
 done # End of File Loop
 
 echo "All done!"
+
+# -------------------------------------------------------------------------
+    # MONITOR MODEL ver2: RobustMLP (High Capacity + High Regularization)
+    # -------------------------------------------------------------------------
+    # 1. Capacity (Width):  Expanded hidden dims from [100, 50] to [512, 256, 128] 
+    #                       to prevent information bottlenecks.
+    # 2. Capacity (Depth):  Increased from 2 layers to 3 layers to enhance non-linear 
+    #                       reasoning capabilities.
+    # 3. Stability:         Added LayerNorm after each linear layer to stabilize 
+    #                       training on larger datasets.
+    # 4. Regularization:    Higher Dropout (0 to 0.3) and L2 (0 to 1e-4) coefficients, 
+    #                       along with early stopping patience of (from 3 to) 10 
+    #                       to counter overfitting in this larger model.
+    # -------------------------------------------------------------------------
