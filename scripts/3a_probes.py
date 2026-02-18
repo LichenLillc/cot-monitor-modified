@@ -207,6 +207,7 @@ class GaussianNoise(nn.Module):
             return x + torch.randn_like(x) * self.std
         return x
 
+# mlp version 1
 class CustomMLP2Layer(nn.Module):
     def __init__(self, input_size, hidden_size1=100, hidden_size2=50, dropout_rate=0.0, noise_std=0.0):
         super(CustomMLP2Layer, self).__init__()
@@ -235,7 +236,59 @@ class CustomMLP2Layer(nn.Module):
         x = self.fc3(x) 
         x = self.sigmoid(x)
         return x
-    
+
+# mlp version 2 (increased capacity and added layer norm)
+class RobustMLP(nn.Module):
+    def __init__(self, input_size, hidden_size1=512, hidden_size2=256, hidden_size3=128, dropout_rate=0.4, noise_std=0):
+        super(RobustMLP, self).__init__()
+        
+        # 1. 输入噪声 (增强鲁棒性)
+        self.noise = GaussianNoise(std=noise_std)
+        
+        # Layer 1: 承接层 (宽)
+        self.fc1 = nn.Linear(input_size, hidden_size1)
+        self.ln1 = nn.LayerNorm(hidden_size1) # 加速收敛，稳定训练
+        self.relu1 = nn.ReLU()
+        self.drop1 = nn.Dropout(dropout_rate)
+        
+        # Layer 2: 逻辑处理层 (中)
+        self.fc2 = nn.Linear(hidden_size1, hidden_size2)
+        self.ln2 = nn.LayerNorm(hidden_size2)
+        self.relu2 = nn.ReLU()
+        self.drop2 = nn.Dropout(dropout_rate)
+
+        # Layer 3: 特征浓缩层 (窄)
+        self.fc3 = nn.Linear(hidden_size2, hidden_size3)
+        self.ln3 = nn.LayerNorm(hidden_size3)
+        self.relu3 = nn.ReLU()
+        self.drop3 = nn.Dropout(dropout_rate)
+        
+        # Output Layer
+        self.head = nn.Linear(hidden_size3, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.noise(x)
+        
+        x = self.fc1(x)
+        x = self.ln1(x)
+        x = self.relu1(x)
+        x = self.drop1(x)
+        
+        x = self.fc2(x)
+        x = self.ln2(x)
+        x = self.relu2(x)
+        x = self.drop2(x)
+
+        x = self.fc3(x)
+        x = self.ln3(x)
+        x = self.relu3(x)
+        x = self.drop3(x)
+        
+        x = self.head(x) 
+        x = self.sigmoid(x)
+        return x
+
 def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -253,14 +306,22 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test):
     val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
     test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
     
-    batch_size = 32
+    # batch_size = 32
+    batch_size = 64
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
     
     input_size = X_train.shape[1]
     
     # Initialize model with arguments for regularization
-    model = CustomMLP2Layer(
+    # version 1
+    # model = CustomMLP2Layer(
+    #     input_size, 
+    #     dropout_rate=args.dropout, 
+    #     noise_std=args.noise
+    # )
+    # version 2
+    model = RobustMLP(
         input_size, 
         dropout_rate=args.dropout, 
         noise_std=args.noise
