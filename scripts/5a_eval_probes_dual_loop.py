@@ -55,6 +55,63 @@ class CustomMLP2Layer(nn.Module):
         return x
 
 # ==========================================
+# 1. MLP Definition (version 2)
+# ==========================================
+class RobustMLP(nn.Module):
+    # 注意：init 参数里我保留了 input_size，其他默认值你可以写死，也可以保留参数接口但不用它
+    def __init__(self, input_size, hidden_size1=512, hidden_size2=256, hidden_size3=128):
+        super(RobustMLP, self).__init__()
+        
+        # --- 移除 self.noise ---
+        
+        # Layer 1
+        self.fc1 = nn.Linear(input_size, hidden_size1)
+        self.ln1 = nn.LayerNorm(hidden_size1) # 【保留】必须留着，它有权重！
+        self.relu1 = nn.ReLU()
+        # --- 移除 self.drop1 ---
+        
+        # Layer 2
+        self.fc2 = nn.Linear(hidden_size1, hidden_size2)
+        self.ln2 = nn.LayerNorm(hidden_size2) # 【保留】
+        self.relu2 = nn.ReLU()
+        # --- 移除 self.drop2 ---
+
+        # Layer 3
+        self.fc3 = nn.Linear(hidden_size2, hidden_size3)
+        self.ln3 = nn.LayerNorm(hidden_size3) # 【保留】
+        self.relu3 = nn.ReLU()
+        # --- 移除 self.drop3 ---
+        
+        # Output Layer
+        self.head = nn.Linear(hidden_size3, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # --- 移除 x = self.noise(x) ---
+        
+        # Layer 1
+        x = self.fc1(x)
+        x = self.ln1(x)
+        x = self.relu1(x)
+        # --- 移除 x = self.drop1(x) ---
+        
+        # Layer 2
+        x = self.fc2(x)
+        x = self.ln2(x)
+        x = self.relu2(x)
+        # --- 移除 x = self.drop2(x) ---
+
+        # Layer 3
+        x = self.fc3(x)
+        x = self.ln3(x)
+        x = self.relu3(x)
+        # --- 移除 x = self.drop3(x) ---
+        
+        x = self.head(x) 
+        x = self.sigmoid(x)
+        return x
+
+# ==========================================
 # 2. Data Loading (Unchanged)
 # ==========================================
 def load_activations(input_folder):
@@ -194,7 +251,8 @@ def evaluate_single_run(model_folder_path, test_dataset_paths, seed, results_dir
 
             # MLP
             input_dim = X_stage3.shape[1]
-            mlp = CustomMLP2Layer(input_size=input_dim).to(device)
+            # mlp = CustomMLP2Layer(input_size=input_dim).to(device)
+            mlp = RobustMLP(input_size=input_dim).to(device) # version 2
             mlp.load_state_dict(torch.load(mlp_path, map_location=device))
             mlp.eval()
             X_mlp_tensor = torch.tensor(X_stage3, dtype=torch.float32).to(device)
@@ -260,36 +318,31 @@ def parse_folder_name(folder_name, suffix_to_remove):
 
     # 3. Determine L1 Priority
     l1 = "Others"
-    token_to_remove = ""
 
-    if "answer" in name:
+    # [新增逻辑] 必须放在 "cot" 和 "wild" 之前判断，否则会被截胡
+    if "wild_cot" in name:
+        l1 = "wild-cot"
+    elif "answer" in name:
         l1 = "syn-cot-code"
-        token_to_remove = "answer" # will also clean prefix later
-        # Also assume prefix contains cot, need to clean carefully
     elif "think-ins" in name:
         l1 = "syn-cot-think-ins"
-        token_to_remove = "think-ins"
     elif "no-cot" in name:
         l1 = "syn-no-cot"
-        token_to_remove = "no-cot"
     elif "cot" in name: 
         # Low priority COT
         l1 = "syn-cot"
-        token_to_remove = "cot"
     elif "wild" in name:
+        # Generic wild (wild_dup4 without cot)
         l1 = "wild"
-        token_to_remove = "wild_dup4" # specific for wild
     else:
         # Fallback/Error check
         pass
 
     # 4. Clean L2
     # Remove common prefixes chunks based on L1
-    # We essentially remove the L1 identifier and standardized prefixes
-    
-    # Simple strategy: Replace known keywords with empty, then strip underscores
-    # Keywords to strip for L2 cleaning:
-    keywords = ["7b_pfc", "cot", "think-ins", "no-cot", "answer", "wild", "dup4"]
+    # [修改] 添加 "wild_cot", "dup1" 到清理列表
+    # 注意顺序：长词优先 (wild_cot 在 wild/cot 之前)
+    keywords = ["7b_pfc", "wild_cot", "cot", "think-ins", "no-cot", "answer", "wild", "dup4", "dup1"]
     
     l2_candidate = name
     for k in keywords:
@@ -379,7 +432,7 @@ def run_matrix_group(mp_path, dp_path, seed, results_root):
     
     # Pre-parse Headers to ensure order and error checking
     # Defined Sort Order
-    L1_ORDER = ["wild", "syn-cot-think-ins", "syn-cot", "syn-cot-code", "syn-no-cot"]
+    L1_ORDER = ["wild-cot", "wild", "syn-cot-think-ins", "syn-cot", "syn-cot-code", "syn-no-cot"]
     
     # Prepare Row/Col Indices
     model_rows = [] # List of (l1, l2, folder_path, id_test_vals)
@@ -478,7 +531,7 @@ def main():
     parser.add_argument("--test_dataset_grandparent_folder", "-dgp", type=str, required=True)
     parser.add_argument("--seed", type=int, default=None)
     # Default output root
-    parser.add_argument("--results_root", type=str, default="../probe_main-table_debug/5a_results_auto")
+    parser.add_argument("--results_root", type=str, default="../probe_main-table_debug/5a_results_auto_v2")
     
     args = parser.parse_args()
     
