@@ -15,7 +15,7 @@ from loguru import logger
 def main():
     parser = argparse.ArgumentParser()
     # 默认路径设为你之前用的路径，方便直接跑
-    parser.add_argument("--results_root", "-rsr", type=str, default="../probe_main-table_debug/5a_results_auto", 
+    parser.add_argument("--results_root", "-rsr", type=str, default="../probe_main-table_debug/5a_results_auto_v2", 
                         help="Root directory containing the TRAIN-xxx_TEST-xxx subfolders")
     
     args = parser.parse_args()

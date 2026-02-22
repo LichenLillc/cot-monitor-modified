@@ -1,17 +1,21 @@
 #!/bin/bash
 
 # ==============================================================================
-# 配置区域 (Configuration)
+# Configuration
 # ==============================================================================
 
-# 1. 文件夹路径
+# 1. Directory Paths
 INPUT_DIR="../data/_main_table_debug/"
 RAW_OUT_DIR="../probe_main-table_debug/raw_outputs/"
 PROCESSED_DIR="../probe_main-table_debug/processed/"
-PROBE_OUT_DIR="../probe_main-table_debug/probe_outputs_v2/"  # changed from probe_outputs to probe_outputs_v2 to avoid confusion with previous runs
+# Using v2 output directory to separate from previous runs
+PROBE_OUT_DIR="../probe_main-table_debug/probe_outputs_v2/"
 
-# 2. 模型列表 (格式: "ACT_SUF|MODEL_NAME")
-# 使用数组定义，方便添加多个模型
+# [NEW] Log Directory
+# Only active/failed jobs will have logs here. Completed logs are auto-deleted.
+LOG_DIR="../probe_main-table_debug/logs/"
+
+# 2. Model List (Format: "ACT_SUF|MODEL_NAME")
 MODELS=(
     "exit_scrt|Lichen2003/Exit-Reward-Hacker_from-scratch_ckpt15n1n5n6"
     "exit_60n20|Lichen2003/Reward-Hacker_exit_K_step-60n20"
@@ -20,8 +24,8 @@ MODELS=(
     "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
 )
 
-# 3. Step 4 白名单 (仅对以下文件执行训练)
-# 模式 A: 留空 = "()" 则对所有文件执行 Step 4 probe monitor training
+# 3. Step 4 Whitelist (Only train probes for these files)
+# Mode A: Empty = "()" means run for ALL files
 STEP4_WHITELIST=(
     "wild_dup4_ln600-uh600"
     "wild_dup4_tn600-uh600"
@@ -43,18 +47,146 @@ STEP4_WHITELIST=(
     "wild_cot_dup1_tn1600_luh1600"
 )
 
+# 4. Parallelization Configuration
+# List of available Physical GPU IDs
+GPU_IDS=(4 5 6 7) 
+NUM_GPUS=${#GPU_IDS[@]}
+
+# Number of concurrent jobs per GPU
+JOBS_PER_GPU=2
+
+# Total number of parallel slots
+MAX_PARALLEL_JOBS=$((NUM_GPUS * JOBS_PER_GPU))
+
+echo "Parallel Config: ${NUM_GPUS} GPUs, ${JOBS_PER_GPU} jobs/GPU."
+echo "Total Concurrent Slots: ${MAX_PARALLEL_JOBS}"
+
 # ==============================================================================
-# 主逻辑 (Main Pipeline)
+# Helper Function: Run Pipeline for Single Model
+# ==============================================================================
+run_pipeline_for_model() {
+    local FILE_PATH=$1
+    local FILE_NAME=$2
+    local ACT_SUF=$3
+    local MODEL_NAME=$4
+    local GPU_ID=$5
+    local SLOT_ID=$6
+
+    # Log setup
+    local SAFE_MODEL_NAME=$(echo "$ACT_SUF" | tr '/' '_')
+    local LOG_FILE="${LOG_DIR}/${FILE_NAME}_${SAFE_MODEL_NAME}.log"
+    
+    # Notify Console (Minimal info)
+    echo "  [Slot ${SLOT_ID} | GPU ${GPU_ID}] START: ${FILE_NAME} | ${MODEL_NAME}"
+    echo "  >> Log: ${LOG_FILE}"
+
+    # Initialize Log
+    echo "=== Pipeline Start: $(date) ===" > "$LOG_FILE"
+    echo "Task: ${FILE_NAME}" >> "$LOG_FILE"
+    echo "Model: ${MODEL_NAME}" >> "$LOG_FILE"
+    echo "GPU: ${GPU_ID}" >> "$LOG_FILE"
+
+    # Prepare processing directory
+    CURRENT_PROCESS_DIR="${PROCESSED_DIR}/${ACT_SUF}"
+    mkdir -p "$CURRENT_PROCESS_DIR"
+
+    # ----------------------------------------------------------------------
+    # Step 2: Converter
+    # ----------------------------------------------------------------------
+    TEMP_JSONL="${RAW_OUT_DIR}/${FILE_NAME}_${ACT_SUF}_slot${SLOT_ID}.jsonl"
+    cp "${RAW_OUT_DIR}/${FILE_NAME}.jsonl" "$TEMP_JSONL"
+    
+    echo -e "\n=== [Step 2] Converter ===" >> "$LOG_FILE"
+    
+    # Run python script. If it fails (exit code != 0):
+    # 1. Echo failure message to log
+    # 2. Return 1 (Stop function execution, preserving the log file)
+    python3 1_2a_converter_mine.py \
+        --input_file "$TEMP_JSONL" \
+        --base_output_dir "$CURRENT_PROCESS_DIR" >> "$LOG_FILE" 2>&1 \
+    || { echo "!!! FAIL: Step 2 Converter crashed. !!!" >> "$LOG_FILE"; return 1; }
+    
+    rm "$TEMP_JSONL"
+
+    # ----------------------------------------------------------------------
+    # Step 3: Get Activations
+    # ----------------------------------------------------------------------
+    ACT_OUTPUT_DIR="${CURRENT_PROCESS_DIR}/${FILE_NAME}_${ACT_SUF}/"
+    mkdir -p "${ACT_OUTPUT_DIR}/activations"
+
+    echo -e "\n=== [Step 3] Activations Extraction ===" >> "$LOG_FILE"
+    
+    CUDA_VISIBLE_DEVICES=$GPU_ID python3 2b_get_activations_mine.py \
+        --results_folder "$ACT_OUTPUT_DIR" \
+        --model_name "$MODEL_NAME" >> "$LOG_FILE" 2>&1 \
+    || { echo "!!! FAIL: Step 3 Activations crashed. !!!" >> "$LOG_FILE"; return 1; }
+
+    # ----------------------------------------------------------------------
+    # Step 4: Train Probes
+    # ----------------------------------------------------------------------
+    RUN_STEP_4=false
+    
+    # Check whitelist
+    if [ ${#STEP4_WHITELIST[@]} -eq 0 ]; then
+        RUN_STEP_4=true
+    else
+        for white_name in "${STEP4_WHITELIST[@]}"; do
+            if [[ "$white_name" == "$FILE_NAME" ]]; then
+                RUN_STEP_4=true
+                break
+            fi
+        done
+    fi
+
+    if [ "$RUN_STEP_4" = true ]; then
+        echo -e "\n=== [Step 4] Probes Training ===" >> "$LOG_FILE"
+        
+        export OMP_NUM_THREADS=3
+        export MKL_NUM_THREADS=3
+        export NUMEXPR_NUM_THREADS=3
+        export OPENBLAS_NUM_THREADS=3
+
+        CUDA_VISIBLE_DEVICES=$GPU_ID python3 3a_probes.py \
+            --input_folder "$ACT_OUTPUT_DIR" \
+            --probe_output_folder "${PROBE_OUT_DIR}/${ACT_SUF}" \
+            --N_runs 30 \
+            --dropout 0.3 \
+            --patience 10 \
+            --l2 1e-4 \
+            --pca \
+            --save_models >> "$LOG_FILE" 2>&1 \
+        || { echo "!!! FAIL: Step 4 Probes crashed. !!!" >> "$LOG_FILE"; return 1; }
+            
+        echo "  [Slot ${SLOT_ID} | GPU ${GPU_ID}] DONE: ${FILE_NAME} (Probes Trained)"
+    else
+        echo -e "\n=== [Step 4] Skipped (Whitelist) ===" >> "$LOG_FILE"
+        echo "  [Slot ${SLOT_ID} | GPU ${GPU_ID}] DONE: ${FILE_NAME} (Probes Skipped)"
+    fi
+
+    # ----------------------------------------------------------------------
+    # SUCCESS: Cleanup
+    # ----------------------------------------------------------------------
+    # If we reached this point, everything ran successfully.
+    # Delete the log file to keep the directory clean.
+    echo "  >> Success! Deleting log file: ${LOG_FILE}"
+    rm "$LOG_FILE"
+}
+
+# ==============================================================================
+# Main Pipeline Logic
 # ==============================================================================
 
-# 确保输出目录存在
+# Ensure directories exist
 mkdir -p "$RAW_OUT_DIR"
 mkdir -p "$PROCESSED_DIR"
 mkdir -p "$PROBE_OUT_DIR"
+mkdir -p "$LOG_DIR"
 
-# 外部循环：遍历 INPUT_DIR 下所有的 .jsonl 文件
+# Global Job Counter
+JOB_COUNT=0
+
+# Outer Loop: Iterate through all .jsonl files in INPUT_DIR
 for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
-    # 获取文件名（不带扩展名），例如 "dup4_tc-n-79..."
     FILE_NAME=$(basename "$FILE_PATH" .jsonl)
     
     echo "========================================================"
@@ -62,88 +194,55 @@ for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
     echo "========================================================"
 
     # --------------------------------------------------------------------------
-    # Step 1: Preprocess (每个数据文件只执行一次)
+    # Step 1: Preprocess (Run once per file, sequentially)
     # --------------------------------------------------------------------------
     echo "[Step 1] Preprocessing..."
     python3 0_preprocess.py \
         --input_file "$FILE_PATH" \
         --output_file "${RAW_OUT_DIR}/${FILE_NAME}.jsonl"
 
-    # 内部循环：遍历所有模型配置
+    # Inner Loop: Iterate through all models
     for model_entry in "${MODELS[@]}"; do
-        # 解析后缀和模型名 (通过 | 分割)
         ACT_SUF="${model_entry%%|*}"
         MODEL_NAME="${model_entry##*|}"
 
-        echo "  ----------------------------------------------------"
-        echo "  Model: ${MODEL_NAME} (Suffix: ${ACT_SUF})"
-        echo "  ----------------------------------------------------"
-
-        # 准备该模型的处理目录
-        CURRENT_PROCESS_DIR="${PROCESSED_DIR}/${ACT_SUF}"
-        mkdir -p "$CURRENT_PROCESS_DIR"
-
-        # ----------------------------------------------------------------------
-        # Step 2: Converter (使用 cp 副本机制)
-        # ----------------------------------------------------------------------
-        echo "  [Step 2] Converting..."
-        # 复制一份副本供转换脚本使用，避免 mv 导致原文件丢失
-        cp "${RAW_OUT_DIR}/${FILE_NAME}.jsonl" "${RAW_OUT_DIR}/${FILE_NAME}_${ACT_SUF}.jsonl"
+        # ------------------------------------------------------
+        # Parallel Scheduling Logic (Virtual Slots)
+        # ------------------------------------------------------
         
-        python3 1_2a_converter_mine.py \
-            --input_file "${RAW_OUT_DIR}/${FILE_NAME}_${ACT_SUF}.jsonl" \
-            --base_output_dir "$CURRENT_PROCESS_DIR"
+        # 1. Calculate Virtual Slot Index
+        SLOT_IDX=$((JOB_COUNT % MAX_PARALLEL_JOBS))
+
+        # 2. Map Slot to Physical GPU
+        GPU_IDX=$((SLOT_IDX % NUM_GPUS))
+        ALLOCATED_GPU=${GPU_IDS[$GPU_IDX]}
+
+        # 3. Launch Job in Background
+        run_pipeline_for_model \
+            "$FILE_PATH" \
+            "$FILE_NAME" \
+            "$ACT_SUF" \
+            "$MODEL_NAME" \
+            "$ALLOCATED_GPU" \
+            "$SLOT_IDX" &
         
-        # 清理副本
-        rm "${RAW_OUT_DIR}/${FILE_NAME}_${ACT_SUF}.jsonl"
+        # 4. Increment Job Counter
+        JOB_COUNT=$((JOB_COUNT + 1))
 
-        # ----------------------------------------------------------------------
-        # Step 3: Get Activations
-        # ----------------------------------------------------------------------
-        echo "  [Step 3] Extracting Activations..."
-        ACT_OUTPUT_DIR="${CURRENT_PROCESS_DIR}/${FILE_NAME}_${ACT_SUF}/"
-        mkdir -p "${ACT_OUTPUT_DIR}/activations"
-
-        python3 2b_get_activations_mine.py \
-            --results_folder "$ACT_OUTPUT_DIR" \
-            --model_name "$MODEL_NAME"
-
-        # ----------------------------------------------------------------------
-        # Step 4: Train Probes (白名单检查逻辑)
-        # ----------------------------------------------------------------------
-        RUN_STEP_4=false
-        
-        # 逻辑：如果名单为空 (模式A)，则运行；否则检查文件名是否在名单中
-        if [ ${#STEP4_WHITELIST[@]} -eq 0 ]; then
-            RUN_STEP_4=true
-        else
-            for white_name in "${STEP4_WHITELIST[@]}"; do
-                if [[ "$white_name" == "$FILE_NAME" ]]; then
-                    RUN_STEP_4=true
-                    break
-                fi
-            done
+        # 5. Batch Synchronization
+        if [ $((JOB_COUNT % MAX_PARALLEL_JOBS)) -eq 0 ]; then
+            echo "--- [Batch Full] Waiting for ${MAX_PARALLEL_JOBS} active jobs to finish ---"
+            wait
+            echo "--- Batch finished, starting next batch ---"
         fi
-
-        if [ "$RUN_STEP_4" = true ]; then
-            echo "  [Step 4] Training Probes..."
-            python3 3a_probes.py \
-                --input_folder "$ACT_OUTPUT_DIR" \
-                --probe_output_folder "${PROBE_OUT_DIR}/${ACT_SUF}" \
-                --N_runs 30 \
-                --dropout 0.3 \
-                --patience 10 \
-                --l2 1e-4 \
-                --pca \
-                --save_models
-        else
-            echo "  [Step 4] Skipped (Not in whitelist)."
-        fi
+        # ------------------------------------------------------
 
     done # End of Model Loop
 
 done # End of File Loop
 
+# Wait for any remaining background jobs
+wait
 echo "All done!"
 
 # -------------------------------------------------------------------------

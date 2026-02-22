@@ -1,21 +1,20 @@
 """
-Script: 5a_eval_probes_loop_v2.py
+Script: 5a_eval_probes_loop_v2.py (Parallel Version)
 
 Description:
     Fully automated Matrix Evaluation for Probes.
-    
-    Features:
-    - Super-Matrix Loop: Iterates over Grandparent Folders (-mgp, -dgp).
-    - Auto-Tabulation: Generates .xlsx reports with 2-level headers and merged cells.
-    - ID-TEST Extraction: Reads training accuracy from training_summary.txt.
-    - Header Parsing: Automatically extracts L1/L2 categories from folder names.
-    - Smart Metrics: Only calcs Accuracy for single-class datasets; 0-100 scale.
-    
-Dependencies:
-    pandas, openpyxl, sklearn, torch, loguru, tqdm, joblib, numpy
+    Now supports Parallel Execution for faster processing.
 """
 
 import os
+# [关键配置] 必须在导入 numpy/torch 之前设置，防止多进程 CPU 过载
+# 限制每个 worker 只使用 1 个线程，依靠多进程(workers=24)来提升吞吐量
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import sys
 import re
 import json
@@ -31,9 +30,10 @@ import torch.nn as nn
 from tqdm import tqdm
 from loguru import logger
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, average_precision_score
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ==========================================
-# 1. MLP Definition (Unchanged)
+# 1. MLP Definitions (Unchanged)
 # ==========================================
 class CustomMLP2Layer(nn.Module):
     def __init__(self, input_size, hidden_size1=100, hidden_size2=50):
@@ -54,59 +54,31 @@ class CustomMLP2Layer(nn.Module):
         x = self.sigmoid(x)
         return x
 
-# ==========================================
-# 1. MLP Definition (version 2)
-# ==========================================
 class RobustMLP(nn.Module):
-    # 注意：init 参数里我保留了 input_size，其他默认值你可以写死，也可以保留参数接口但不用它
     def __init__(self, input_size, hidden_size1=512, hidden_size2=256, hidden_size3=128):
         super(RobustMLP, self).__init__()
-        
-        # --- 移除 self.noise ---
-        
-        # Layer 1
         self.fc1 = nn.Linear(input_size, hidden_size1)
-        self.ln1 = nn.LayerNorm(hidden_size1) # 【保留】必须留着，它有权重！
+        self.ln1 = nn.LayerNorm(hidden_size1) 
         self.relu1 = nn.ReLU()
-        # --- 移除 self.drop1 ---
-        
-        # Layer 2
         self.fc2 = nn.Linear(hidden_size1, hidden_size2)
-        self.ln2 = nn.LayerNorm(hidden_size2) # 【保留】
+        self.ln2 = nn.LayerNorm(hidden_size2)
         self.relu2 = nn.ReLU()
-        # --- 移除 self.drop2 ---
-
-        # Layer 3
         self.fc3 = nn.Linear(hidden_size2, hidden_size3)
-        self.ln3 = nn.LayerNorm(hidden_size3) # 【保留】
+        self.ln3 = nn.LayerNorm(hidden_size3)
         self.relu3 = nn.ReLU()
-        # --- 移除 self.drop3 ---
-        
-        # Output Layer
         self.head = nn.Linear(hidden_size3, 1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # --- 移除 x = self.noise(x) ---
-        
-        # Layer 1
         x = self.fc1(x)
         x = self.ln1(x)
         x = self.relu1(x)
-        # --- 移除 x = self.drop1(x) ---
-        
-        # Layer 2
         x = self.fc2(x)
         x = self.ln2(x)
         x = self.relu2(x)
-        # --- 移除 x = self.drop2(x) ---
-
-        # Layer 3
         x = self.fc3(x)
         x = self.ln3(x)
         x = self.relu3(x)
-        # --- 移除 x = self.drop3(x) ---
-        
         x = self.head(x) 
         x = self.sigmoid(x)
         return x
@@ -172,11 +144,12 @@ def calculate_metrics(y_true, y_pred, y_probs):
     return metrics
 
 # ==========================================
-# 4. Evaluation Logic (Modified Return)
+# 4. Evaluation Logic (Parallel Optimized)
 # ==========================================
 def evaluate_single_run(model_folder_path, test_dataset_paths, seed, results_dir):
     """
-    Returns: Dictionary containing final results (not string).
+    Returns: Dictionary containing final results.
+    Note: Forces CPU usage to allow multiprocessing safety.
     """
     model_dir = model_folder_path / "saved_models"
     if not model_dir.exists():
@@ -219,7 +192,9 @@ def evaluate_single_run(model_folder_path, test_dataset_paths, seed, results_dir
         "mlp": collections.defaultdict(list)
     }
     detailed_results = []
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # [并发修改] 强制使用 CPU，避免多进程抢占 GPU 显存或死锁
+    device = torch.device("cpu")
 
     for s in seeds_to_run:
         try:
@@ -251,10 +226,10 @@ def evaluate_single_run(model_folder_path, test_dataset_paths, seed, results_dir
 
             # MLP
             input_dim = X_stage3.shape[1]
-            # mlp = CustomMLP2Layer(input_size=input_dim).to(device)
             mlp = RobustMLP(input_size=input_dim).to(device) # version 2
             mlp.load_state_dict(torch.load(mlp_path, map_location=device))
             mlp.eval()
+            
             X_mlp_tensor = torch.tensor(X_stage3, dtype=torch.float32).to(device)
             with torch.no_grad():
                 probs_mlp = mlp(X_mlp_tensor).squeeze().cpu().numpy()
@@ -363,35 +338,23 @@ def get_id_test_accuracy(model_folder):
     
     try:
         content = summary_path.read_text(encoding='utf-8')
-        # Look for the table at the end
-        # Model | f1 | accuracy ...
-        # `logreg ` | ... | 99.2 ± 0.3 | ...
-        
         results = {}
         for model_key in ["logreg", "mlp"]:
-            # Regex: Look for line starting with backticked or plain model name
-            # Capture the 3rd column (Accuracy)
-            # Pattern: model_name [spaces] | [f1 col] | [ACCURACY COL] | ...
-            # We assume | is the separator
-            
-            # Simple line scanner
             for line in content.splitlines():
                 if model_key in line.lower() and "|" in line:
                     parts = [p.strip() for p in line.split("|")]
-                    # parts[0] is model, parts[1] is f1, parts[2] is accuracy
                     if len(parts) >= 3:
                         results[model_key] = parts[2] # "99.2 ± 0.3"
                         break
-        
         return results
     except Exception as e:
         logger.warning(f"Failed to parse training_summary.txt for {model_folder.name}: {e}")
         return {"logreg": "N/A", "mlp": "N/A"}
 
 # ==========================================
-# 6. Main Matrix Logic
+# 6. Main Matrix Logic (Parallel)
 # ==========================================
-def run_matrix_group(mp_path, dp_path, seed, results_root):
+def run_matrix_group(mp_path, dp_path, seed, results_root, max_workers=24):
     """
     Runs the LxM matrix for one pair of Parent Folders.
     Generates Excel report at the end.
@@ -423,29 +386,24 @@ def run_matrix_group(mp_path, dp_path, seed, results_root):
         return
 
     # Data Structure for Report:
-    # table_data[model_key]["id_test"] = val
-    # table_data[model_key][(ds_l1, ds_l2)] = val
     report_data = {
         "logreg": {},
         "mlp": {}
     }
     
-    # Pre-parse Headers to ensure order and error checking
     # Defined Sort Order
     L1_ORDER = ["wild-cot", "wild", "syn-cot-think-ins", "syn-cot", "syn-cot-code", "syn-no-cot"]
     
     # Prepare Row/Col Indices
-    model_rows = [] # List of (l1, l2, folder_path, id_test_vals)
-    dataset_cols = [] # List of (l1, l2, folder_path)
+    model_rows = [] 
+    dataset_cols = [] 
 
     # Process Models (Rows)
     for m in models:
         l1, l2 = parse_folder_name(m.name, mp_name)
         if l1 == "Others" or l1 not in L1_ORDER:
-            # You requested to Error if Others
             logger.error(f"Unknown L1 category for model: {m.name} -> {l1}. Aborting.")
             sys.exit(1)
-        
         id_test_vals = get_id_test_accuracy(m)
         model_rows.append((l1, l2, m, id_test_vals))
     
@@ -457,40 +415,55 @@ def run_matrix_group(mp_path, dp_path, seed, results_root):
             sys.exit(1)
         dataset_cols.append((l1, l2, d))
 
-    # Run Evaluations
-    # Loop Models
-    for ml1, ml2, m_path, id_vals in tqdm(model_rows, desc="Models", leave=False):
-        
-        # Init row in report if needed
+    # --- Build Parallel Tasks ---
+    tasks = []
+    for ml1, ml2, m_path, id_vals in model_rows:
         row_key = (ml1, ml2)
         
-        # Store ID-TEST
-        if row_key not in report_data["logreg"]: 
-            report_data["logreg"][row_key] = {"ID-TEST": id_vals.get("logreg", "N/A")}
-            report_data["mlp"][row_key] = {"ID-TEST": id_vals.get("mlp", "N/A")}
-
-        # Loop Datasets
+        # Init ID-TEST in report
+        for m_type in ["logreg", "mlp"]:
+            if row_key not in report_data[m_type]:
+                report_data[m_type][row_key] = {"ID-TEST": id_vals.get(m_type, "N/A")}
+                
         for dl1, dl2, d_path in dataset_cols:
             col_key = (dl1, dl2)
+            # Pre-fill N/A
+            for m_type in ["logreg", "mlp"]:
+                report_data[m_type][row_key][col_key] = "N/A"
             
-            # Eval
-            res = evaluate_single_run(m_path, [d_path], seed, group_out_dir)
-            
-            if res:
-                # Extract Accuracy (Mean ± Std)
-                for m_type in ["logreg", "mlp"]:
-                    stats = res["summary"][m_type]["accuracy"]
-                    val_str = f"{stats['mean']:.2f} ± {stats['std']:.2f}"
-                    report_data[m_type][row_key][col_key] = val_str
-            else:
-                for m_type in ["logreg", "mlp"]:
-                    report_data[m_type][row_key][col_key] = "N/A"
+            # Create Task
+            tasks.append({
+                "m_path": m_path,
+                "d_path": d_path,
+                "row_key": row_key,
+                "col_key": col_key
+            })
+
+    logger.info(f"Launching {len(tasks)} tasks with {max_workers} workers...")
+
+    # --- Execute Parallel ---
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {
+            executor.submit(evaluate_single_run, t["m_path"], [t["d_path"]], seed, group_out_dir): t
+            for t in tasks
+        }
+        
+        for future in tqdm(as_completed(future_to_task), total=len(tasks), desc="Eval Progress"):
+            task = future_to_task[future]
+            try:
+                res = future.result()
+                if res:
+                    for m_type in ["logreg", "mlp"]:
+                        stats = res["summary"][m_type]["accuracy"]
+                        val_str = f"{stats['mean']:.2f} ± {stats['std']:.2f}"
+                        report_data[m_type][task["row_key"]][task["col_key"]] = val_str
+            except Exception as e:
+                logger.error(f"Task failed: {e}")
 
     # --- Generate Excel ---
     excel_path = group_out_dir / "summary_report.xlsx"
     
     # Sort Columns
-    # Filter datasets that exist in L1_ORDER
     sorted_cols = sorted(dataset_cols, key=lambda x: (L1_ORDER.index(x[0]), x[1]))
     col_index = pd.MultiIndex.from_tuples([(x[0], x[1]) for x in sorted_cols], names=['Type', 'Detail'])
     
@@ -501,7 +474,6 @@ def run_matrix_group(mp_path, dp_path, seed, results_root):
     with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
         for m_type in ["logreg", "mlp"]:
             # Build DataFrame
-            # Init empty DF
             df = pd.DataFrame(index=row_index, columns=col_index)
             
             # Fill Data
@@ -516,10 +488,7 @@ def run_matrix_group(mp_path, dp_path, seed, results_root):
                     df.loc[r_key, c_key] = val
             
             # Insert ID-TEST at the beginning (Level 0 col)
-            # To mix MultiIndex cols with a single col is tricky in pandas.
-            # Easiest way: Add it as a column ('ID-TEST', '')
             df.insert(0, ('ID-TEST', ''), id_test_col)
-            
             df.to_excel(writer, sheet_name=m_type)
             
     logger.success(f"Report generated: {excel_path}")
@@ -532,6 +501,8 @@ def main():
     parser.add_argument("--seed", type=int, default=None)
     # Default output root
     parser.add_argument("--results_root", type=str, default="../probe_main-table_debug/5a_results_auto_v2")
+    # Concurrency Config
+    parser.add_argument("--workers", type=int, default=24, help="Number of parallel processes")
     
     args = parser.parse_args()
     
@@ -553,7 +524,7 @@ def main():
     # Matrix Loop
     for mp in mps:
         for dp in dps:
-            run_matrix_group(mp, dp, args.seed, results_root)
+            run_matrix_group(mp, dp, args.seed, results_root, max_workers=args.workers)
 
 if __name__ == "__main__":
     main()

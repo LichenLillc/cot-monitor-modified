@@ -7,6 +7,7 @@ Now supports merging multiple input folders for training.
 import collections
 from loguru import logger
 import os
+import sys  # Added for sys.exit()
 import json
 import torch
 import argparse
@@ -70,6 +71,43 @@ else:
 
 PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / out_dir_name
 PROBE_OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+# -----------------------------------------------------------------------------
+# [NEW] Auto-Skip Logic
+# -----------------------------------------------------------------------------
+def check_if_already_done():
+    summary_path = PROBE_OUTPUT_FOLDER / "training_summary.txt"
+    
+    # 1. Check if summary exists
+    if not summary_path.exists():
+        return False
+    
+    # 2. If save_models is requested, check if all seed model files exist
+    if args.save_models:
+        models_dir = PROBE_OUTPUT_FOLDER / "saved_models"
+        if not models_dir.exists():
+            return False
+            
+        for seed in range(args.N_runs):
+            # Essential files checking
+            required_files = [
+                models_dir / f"logreg_seed{seed}.joblib",
+                models_dir / f"mlp_seed{seed}.pth",
+                models_dir / f"global_scaler_seed{seed}.joblib",
+                models_dir / f"mlp_internal_scaler_seed{seed}.joblib"
+            ]
+            if args.pca:
+                required_files.append(models_dir / f"pca_seed{seed}.joblib")
+            
+            # If any file is missing, cannot skip
+            if not all(f.exists() for f in required_files):
+                return False
+                
+    return True
+
+if check_if_already_done():
+    logger.success(f"Skipping {out_dir_name}: Summary and {args.N_runs} model runs already exist.")
+    sys.exit(0)
 
 # -----------------------------------------------------------------------------
 # Data Loading & Preparation

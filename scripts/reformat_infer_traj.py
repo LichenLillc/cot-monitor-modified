@@ -12,9 +12,9 @@ def parse_args():
     parser.add_argument("--input_file", type=str, nargs='+', required=True, help="Path(s) to input inference .json, .jsonl or .parquet files")
     parser.add_argument("--output_file", type=str, required=True, help="Path to save converted .jsonl file")
     
-    parser.add_argument("--hacking_label", type=int, default=1, help="Value for hacking_label (default: 1)")
-    parser.add_argument("--hacking_type", type=str, default="unknown", help="Value for hacking_type (default: unknown)")
-    parser.add_argument("--traj_source", type=str, default="my_qwen7b_pfc_prompted", help="Value for traj_source")
+    parser.add_argument("--hacking_label", type=int, default=0, help="Value for hacking_label (default: 1)")
+    parser.add_argument("--hacking_type", type=str, default="normal", help="Value for hacking_type (default: unknown)")
+    parser.add_argument("--traj_source", type=str, default="my_qwen_RH-ckpt61_infer", help="Value for traj_source")
     
     parser.add_argument("--max_responses", type=int, default=None, help="Maximum number of responses to keep per prompt (randomly sampled)")
     
