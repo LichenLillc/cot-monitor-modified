@@ -2,12 +2,13 @@
 Trains simple probes (logistic regression and MLPs) to predict safety alignment outcomes from CoT activations.
 Now includes adjustable Regularization (L2, Dropout, Noise) and Early Stopping via CLI arguments.
 Now supports merging multiple input folders for training.
+Now supports dynamic MLP architecture selection (v1, v2, v3).
 """
 
 import collections
 from loguru import logger
 import os
-import sys  # Added for sys.exit()
+import sys
 import json
 import torch
 import argparse
@@ -25,7 +26,6 @@ import joblib
 import re
 import random
 
-# [修复 ImportError] 动态将父目录加入到系统路径中，以便读取 utils.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils import eval_pred, add_to_final_scores, calculate_metrics_stats, save_probe_outputs_tsv
 
@@ -40,6 +40,10 @@ parser.add_argument("--sample_K", type=int, default=-1, help="number of training
 parser.add_argument("--pca", action="store_true", help="run PCA")
 parser.add_argument("--pca_components", type=int, default=50, help="number of PCA components")
 
+# [新增] 模型架构版本选择参数
+parser.add_argument("--version", "-v", type=int, choices=[1, 2, 3], default=2,
+                    help="MLP architecture version: 1 (CustomMLP), 2 (RobustMLP), 3 (DANN)")
+
 ### Regularization & Training Hyperparameters
 parser.add_argument('--l2', type=float, nargs='?', const=1e-3, default=0.0,
                     help='L2 regularization strength (weight decay). Default if flag used: 1e-3')
@@ -49,6 +53,8 @@ parser.add_argument('--noise', type=float, nargs='?', const=0.05, default=0.0,
                     help='Gaussian noise std dev added to inputs. Default if flag used: 0.05')
 parser.add_argument('--patience', type=int, nargs='?', const=5, default=3,
                     help='Early stopping patience (epochs). Default if flag used: 5. Default if no flag: 2')
+parser.add_argument('--epoch', type=int, nargs='?', const=5, default=50,
+                    help='num of epochs')
 
 ### storing test prediction outputs
 parser.add_argument("--store_outputs", action="store_true", help="whether to store model outputs")
@@ -73,7 +79,7 @@ PROBE_OUTPUT_FOLDER = pathlib.Path(args.probe_output_folder) / out_dir_name
 PROBE_OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------------------------------------------------------
-# [NEW] Auto-Skip Logic
+# Auto-Skip Logic
 # -----------------------------------------------------------------------------
 def check_if_already_done():
     summary_path = PROBE_OUTPUT_FOLDER / "training_summary.txt"
@@ -195,9 +201,6 @@ def apply_pca(X_train, X_val, X_test):
     X_test_pca = pca.transform(X_test)
     return X_train_pca, X_val_pca, X_test_pca, pca
 
-# -----------------------------------------------------------------------------
-# PairedBatchSampler
-# -----------------------------------------------------------------------------
 class PairedBatchSampler(Sampler):
     def __init__(self, prompt_ids, batch_size):
         self.grouped_indices = collections.defaultdict(list)
@@ -241,7 +244,6 @@ class GaussianNoise(nn.Module):
             return x + torch.randn_like(x) * self.std
         return x
 
-# mlp version 1
 class CustomMLP2Layer(nn.Module):
     def __init__(self, input_size, hidden_size1=100, hidden_size2=50, dropout_rate=0.0, noise_std=0.0):
         super(CustomMLP2Layer, self).__init__()
@@ -265,7 +267,6 @@ class CustomMLP2Layer(nn.Module):
         x = self.sigmoid(x)
         return x
 
-# mlp version 2
 class RobustMLP(nn.Module):
     def __init__(self, input_size, hidden_size1=512, hidden_size2=256, hidden_size3=128, dropout_rate=0.4, noise_std=0):
         super(RobustMLP, self).__init__()
@@ -296,13 +297,11 @@ class RobustMLP(nn.Module):
         x = self.sigmoid(self.head(x))
         return x
 
-# mlp version 3 (DANN)
 class DomainAdversarialMLP(nn.Module):
     def __init__(self, input_size, hidden_size1=512, hidden_size2=256, hidden_size3=128, dropout_rate=0.4, noise_std=0):
         super(DomainAdversarialMLP, self).__init__()
         self.noise = GaussianNoise(std=noise_std)
         
-        # Part A: Shared Layers (特征提取器)
         self.shared1 = nn.Linear(input_size, hidden_size1)
         self.ln1 = nn.LayerNorm(hidden_size1)
         self.drop1 = nn.Dropout(dropout_rate)
@@ -311,13 +310,11 @@ class DomainAdversarialMLP(nn.Module):
         self.ln2 = nn.LayerNorm(hidden_size2)
         self.drop2 = nn.Dropout(dropout_rate)
 
-        # Part B: Task Head
         self.task_fc = nn.Linear(hidden_size2, hidden_size3)
         self.task_ln = nn.LayerNorm(hidden_size3)
         self.task_drop = nn.Dropout(dropout_rate)
         self.task_head = nn.Linear(hidden_size3, 1)
 
-        # Part C: Domain Head
         self.domain_fc = nn.Linear(hidden_size2, hidden_size3)
         self.domain_ln = nn.LayerNorm(hidden_size3)
         self.domain_drop = nn.Dropout(dropout_rate)
@@ -344,7 +341,6 @@ class DomainAdversarialMLP(nn.Module):
 # -----------------------------------------------------------------------------
 # Training Functions
 # -----------------------------------------------------------------------------
-# [恢复] 用于 Version 1 和 Version 2 的普通 MLP 训练器
 def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test, train_ids=None):
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -373,7 +369,11 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test, train_ids=None):
     
     input_size = X_train.shape[1]
     
-    model = RobustMLP(input_size, dropout_rate=args.dropout, noise_std=args.noise)
+    # [修改] 根据 version 动态选择 V1 或 V2 模型
+    if args.version == 1:
+        model = CustomMLP2Layer(input_size, dropout_rate=args.dropout, noise_std=args.noise)
+    else:
+        model = RobustMLP(input_size, dropout_rate=args.dropout, noise_std=args.noise)
     
     num_pos = np.sum(y_train)
     num_neg = len(y_train) - num_pos
@@ -387,12 +387,14 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test, train_ids=None):
     criterion = nn.BCELoss(reduction='none')
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=args.l2)
     
-    num_epochs = 50
+    num_epochs = args.epoch
     best_f1 = 0
     best_model_state = None
     
     patience = args.patience
     patience_counter = 0
+    
+    print(f"\n--- Starting Standard MLP Training (Version {args.version}) ---")
     
     for epoch in range(num_epochs):
         model.train()
@@ -428,7 +430,7 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test, train_ids=None):
             patience_counter += 1
             
         if patience_counter >= patience:
-            print(f"Early stopping at epoch {epoch+1} (Patience: {patience})")
+            logger.info(f"Early stopping at epoch {epoch+1} (Patience: {patience})")
             break
 
     if best_model_state is not None:
@@ -443,7 +445,6 @@ def train_mlp(X_train, y_train, X_val, y_val, X_test, y_test, train_ids=None):
     return y_pred, y_pred_prob, model, scaler
 
 
-# [新增] 用于 Version 3 的交替对抗 DANN 训练器
 def train_dann_mlp(X_train, y_train, X_val, y_val, X_test, y_test, keys_train, keys_val, keys_test, log_path=None):
     scaler = StandardScaler()
     X_train_tensor = torch.FloatTensor(scaler.fit_transform(X_train))
@@ -454,7 +455,6 @@ def train_dann_mlp(X_train, y_train, X_val, y_val, X_test, y_test, keys_train, k
     
     X_test_tensor = torch.FloatTensor(scaler.transform(X_test))
     
-    # 获取 Domain 标签
     def get_domain_labels(keys):
         return np.array([1.0 if 'taco' in k.lower() else 0.0 for k in keys])
         
@@ -496,7 +496,7 @@ def train_dann_mlp(X_train, y_train, X_val, y_val, X_test, y_test, keys_train, k
     patience_counter = 0
     lambda_entropy_max = 1.0 
     
-    print(f"\n--- Starting DANN Training ---")
+    print(f"\n--- Starting DANN Training (Version 3) ---")
     
     if log_path:
         with open(log_path, "w", encoding="utf-8") as f:
@@ -519,7 +519,6 @@ def train_dann_mlp(X_train, y_train, X_val, y_val, X_test, y_test, keys_train, k
             b_size = inputs.size(0)
             total_samples += b_size
             
-            # Step A: Train Domain Head
             feat_detached = model.extract_features(inputs).detach() 
             d_pred = model.predict_domain(feat_detached)
             loss_domain = criterion_domain(d_pred, d_labels)
@@ -531,7 +530,6 @@ def train_dann_mlp(X_train, y_train, X_val, y_val, X_test, y_test, keys_train, k
             epoch_dom_loss += loss_domain.item() * b_size
             dom_correct += ((d_pred >= 0.5).float() == d_labels).sum().item()
             
-            # Step B: Train Shared Layers + Task Head
             feat = model.extract_features(inputs)
             t_pred = model.predict_task(feat)
             d_pred_for_shared = model.predict_domain(feat) 
@@ -555,7 +553,6 @@ def train_dann_mlp(X_train, y_train, X_val, y_val, X_test, y_test, keys_train, k
         avg_dom_acc = dom_correct / total_samples
         avg_entropy = epoch_entropy / total_samples
 
-        # Validation
         model.eval()
         y_pred, y_true = [], []
         with torch.no_grad():
@@ -625,7 +622,7 @@ def main():
         logger.error("[FATAL ERROR] Found 0 activations! Aborting.")
         sys.exit(1)
     
-    logger.info(f"Configuration -> L2: {args.l2}, Dropout: {args.dropout}, Noise: {args.noise}, Patience: {args.patience}")
+    logger.info(f"Configuration -> L2: {args.l2}, Dropout: {args.dropout}, Noise: {args.noise}, Patience: {args.patience}, Version: {args.version}")
     logger.info(f"Output Folder: {PROBE_OUTPUT_FOLDER}")
 
     D_final_logreg_scores = collections.defaultdict(list)
@@ -690,17 +687,24 @@ def main():
         keys_train = [prompt_sent_ids[i] for i in train_indices]
         keys_val = [prompt_sent_ids[i] for i in val_indices]
         
-        curves_dir = PROBE_OUTPUT_FOLDER / "training_curves"
-        curves_dir.mkdir(parents=True, exist_ok=True)
-        log_file_path = curves_dir / f"dann_metrics_seed{seed}.txt"
-        
         logreg_y_pred, logreg_y_pred_prob, logreg_model = train_logistic_regression(X_train, y_train, X_test, y_test)
         
-        mlp_y_pred, mlp_y_pred_prob, mlp_model, mlp_internal_scaler = train_dann_mlp(
-            X_train, y_train, X_val, y_val, X_test, y_test, 
-            keys_train=keys_train, keys_val=keys_val, keys_test=keys_test,
-            log_path=log_file_path
-        )
+        # [修改] 动态根据 version 选择调用的模型训练器
+        if args.version == 3:
+            curves_dir = PROBE_OUTPUT_FOLDER / "training_curves"
+            curves_dir.mkdir(parents=True, exist_ok=True)
+            log_file_path = curves_dir / f"dann_metrics_seed{seed}.txt"
+            
+            mlp_y_pred, mlp_y_pred_prob, mlp_model, mlp_internal_scaler = train_dann_mlp(
+                X_train, y_train, X_val, y_val, X_test, y_test, 
+                keys_train=keys_train, keys_val=keys_val, keys_test=keys_test,
+                log_path=log_file_path
+            )
+        else:
+            mlp_y_pred, mlp_y_pred_prob, mlp_model, mlp_internal_scaler = train_mlp(
+                X_train, y_train, X_val, y_val, X_test, y_test, 
+                train_ids=keys_train
+            )
 
         np.random.seed(seed)
         positive_prior = np.sum(y_train == 1)/len(y_train)

@@ -288,11 +288,15 @@ def evaluate_single_run(model_folder_path, test_dataset_paths, seed, results_dir
             input_dim = X_stage3.shape[1]
             
             is_v3 = any(k.startswith("domain_head") for k in state_dict.keys())
+            # V2 (RobustMLP) 有 LayerNorm 层 (ln1, ln2...)，V1 (CustomMLP) 没有
+            is_v2 = any(k.startswith("ln1") for k in state_dict.keys())
             
             if is_v3:
                 mlp = DomainAdversarialMLP(input_size=input_dim).to(device)
-            else:
+            elif is_v2:
                 mlp = RobustMLP(input_size=input_dim).to(device)
+            else:
+                mlp = CustomMLP2Layer(input_size=input_dim).to(device)
                 
             mlp.load_state_dict(state_dict)
             mlp.eval()
@@ -380,13 +384,13 @@ def parse_folder_name(folder_name, suffix_to_remove):
     l1 = "Others"
 
     if "7b_pfc_think-ins" in name:
-        l1 = "7b-pfc"
+        l1 = "qwen7b-pfc"
     elif "ds-coder-ckpt280" in name:
         l1 = "ds-coder"
-    elif "qwen_exit-ckpt68" in name:
-        l1 = "qwen-exit"
     elif "qwen_scratch-ckpt61" in name:
         l1 = "qwen-unittest"
+    elif "qwen_exit-ckpt68" in name:
+        l1 = "qwen-exit"
     elif "wild" in name:
         l1 = "qwen-exit-scratch"
 
@@ -441,7 +445,7 @@ def prepare_matrix_group(mp_path, dp_path, results_root):
         return None
 
     report_data = {"logreg": {}, "mlp": {}, "mlp_domain": {}}
-    L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "7b-pfc"]
+    L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "qwen7b-pfc"]
     
     model_rows = [] 
     dataset_cols = [] 
@@ -496,7 +500,7 @@ def generate_excel_report(config):
     model_rows = config["model_rows"]
     dataset_cols = config["dataset_cols"]
     
-    L1_ORDER = ["qwen-exit", "qwen-scratch", "qwen-exit-scratch", "ds-coder", "7b-pfc"]
+    L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "qwen7b-pfc"]
     
     excel_path = group_out_dir / "summary_report.xlsx"
     sorted_cols = sorted(dataset_cols, key=lambda x: (L1_ORDER.index(x[0]), x[1]))
@@ -547,7 +551,7 @@ def main():
     parser.add_argument("--model_grandparent_folder", "-mgp", type=str, required=True)
     parser.add_argument("--test_dataset_grandparent_folder", "-dgp", type=str, required=True)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--results_root", type=str, default="../../main_table3_paired/5a_results_auto_v3")
+    parser.add_argument("--results_root", type=str, default="../../main_table3_paired/5a_results_auto_v1_0312_noEOS_pca")
     parser.add_argument("--workers", type=int, default=48, help="Number of parallel processes")
     args = parser.parse_args()
     

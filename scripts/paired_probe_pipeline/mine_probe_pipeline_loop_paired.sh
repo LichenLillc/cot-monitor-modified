@@ -1,27 +1,36 @@
 #!/bin/bash
-
+# ==============================================================================
+# [NEW] 僵尸进程终结者：捕获 Ctrl+C 和终止信号，自动清理所有子进程
+# ==============================================================================
+cleanup() {
+    echo -e "\n🚨 收到终止信号 (Ctrl+C)！正在清理所有后台进程..."
+    # 杀掉当前脚本( $$ )产生的所有子进程
+    pkill -P $$ 
+    echo "✅ 清理完毕，安全退出。"
+    exit 1
+}
+# 捕获 SIGINT (Ctrl+C) 和 SIGTERM (kill) 信号，触发 cleanup 函数
+trap cleanup SIGINT SIGTERM
 # ==============================================================================
 # Configuration
 # ==============================================================================
 
 # 1. Directory Paths
-INPUT_DIR="../../main_table3_paired/exp_data/"
-RAW_OUT_DIR="../../main_table3_paired/raw_outputs/"
-PROCESSED_DIR="../../main_table3_paired/processed/"
+INPUT_DIR="../../main_table3_paired/exp_0314/exp_data_0314/"
+RAW_OUT_DIR="../../main_table3_paired/exp_0314/raw_outputs/"
+PROCESSED_DIR="../../main_table3_paired/exp_0314/processed/"
 # Using v3 output directory to separate from previous runs
-PROBE_OUT_DIR="../../main_table3_paired/probe_outputs_v2_2/"
+PROBE_OUT_DIR="../../main_table3_paired/exp_0314/probe_outputs/"
 
 # [NEW] Log Directory
 # Only active/failed jobs will have logs here. Completed logs are auto-deleted.
-LOG_DIR="../../main_table3_paired/logs/"
-
+LOG_DIR="../../main_table3_paired/exp_0314/logs/"
 # 2. Model List (Format: "ACT_SUF|MODEL_NAME")
 MODELS=(
     "exit_scrt|Lichen2003/Exit-Reward-Hacker_from-scratch_ckpt15n1n5n6"
     "exit_68|Lichen2003/Reward-Hacker_exit_step-68"
     "ckpt61|Lichen2003/Reward-Hacker_from-scratch_ckpt61"
     "Qwen7B|Qwen/Qwen2.5-Coder-7B-Instruct"
-    "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
     "DS_ckpt280|Lichen2003/DS-Coder-Reward-Hacker-ckpt280"
     "DS1p3B|deepseek-ai/deepseek-coder-1.3b-instruct"
 )
@@ -33,18 +42,22 @@ STEP4_WHITELIST=(
     "ds-coder-ckpt280_paired-tn8000-tuh8000"
     "qwen_exit-ckpt68_paired-ln1100-leh1100-tn1100-teh1100"
     "qwen_scratch-ckpt61_paired-ln2000-luh2000-tn2000-tuh2000"
+    "qwen_scratch-ckpt61_paired-ln2000-luh2000-tn2000-tuh2000-teh257"
+    "qwen_scratch-ckpt61_paired-ln2000-luh2000-tn2000-tuh2000-teh257-lehscr21"
+    "qwen_scratch-ckpt61_paired-ln2000-luh2000-tn2000-tuh2000_qwen_exit-ckpt68_paired-ln1100-leh1100-tn1100-teh1100"
+    "qwen_scratch-ckpt61_unpaired-ln800-luh800-tn800-tuh800"
 )
 
 # 4. Parallelization Configuration
 # --- GPU Config (Phase 1) ---
-GPU_IDS=(0 1 2 3) 
+GPU_IDS=(4 5 6 7) 
 NUM_GPUS=${#GPU_IDS[@]}
-JOBS_PER_GPU=2
+JOBS_PER_GPU=1
 MAX_PARALLEL_JOBS=$((NUM_GPUS * JOBS_PER_GPU))
 
 # --- CPU Config (Phase 2) ---
 # 分配 24 个并发槽位，结合下方 OMP_NUM_THREADS=2，总共占用 48 核心
-MAX_CPU_JOBS=24
+MAX_CPU_JOBS=48
 
 echo "Parallel Config [GPU]: ${NUM_GPUS} GPUs, ${JOBS_PER_GPU} jobs/GPU. Total Slots: ${MAX_PARALLEL_JOBS}"
 echo "Parallel Config [CPU]: ${MAX_CPU_JOBS} Total Slots."
@@ -122,10 +135,10 @@ run_cpu_step() {
     if [ "$RUN_STEP_4" = true ]; then
         echo "  🟢 [CPU Slot ${SLOT_ID}] Whitelist MATCHED! Starting 3a_probes_paired.py..."
         
-        export OMP_NUM_THREADS=2
-        export MKL_NUM_THREADS=2
-        export NUMEXPR_NUM_THREADS=2
-        export OPENBLAS_NUM_THREADS=2
+        export OMP_NUM_THREADS=1
+        export MKL_NUM_THREADS=1
+        export NUMEXPR_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
 
         CUDA_VISIBLE_DEVICES=-1 python3 3a_probes_paired.py \
             --input_folder "$ACT_OUTPUT_DIR" \
@@ -135,6 +148,7 @@ run_cpu_step() {
             --patience 10 \
             --l2 1e-4 \
             --pca \
+            --version 1 \
             --save_models > "$LOG_FILE" 2>&1 \
         || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 4 (3a script)! Check: $LOG_FILE"; return 1; }
             
@@ -156,40 +170,66 @@ mkdir -p "$PROCESSED_DIR"
 mkdir -p "$PROBE_OUT_DIR"
 mkdir -p "$LOG_DIR"
 
-echo -e "\n>>>>>>>>>> PHASE 1: GPU EXTRACTION <<<<<<<<<<"
-JOB_COUNT=0
+echo -e "\n>>>>>>>>>> PHASE 1: GPU EXTRACTION (Worker Pool Mode) <<<<<<<<<<"
+
+# 1. 建立一个临时任务队列文件
+TASK_QUEUE="${PROCESSED_DIR}/gpu_task_queue.txt"
+> "$TASK_QUEUE" # 清空/创建文件
 
 for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
     FILE_NAME=$(basename "$FILE_PATH" .jsonl)
     
     echo "========================================================"
-    echo "Processing Data File [Phase 1]: ${FILE_NAME}"
+    echo "Preparing Data File [Phase 1]: ${FILE_NAME}"
     echo "========================================================"
 
-    # Step 1: Preprocess (Run once per file, sequentially)
-    echo "[Step 1] Preprocessing..."
+    # Step 1: Preprocess (依然串行执行一次即可)
+    echo "[Step 1] Preprocessing ${FILE_NAME}..."
     python3 0_preprocess_paired.py \
         --input_file "$FILE_PATH" \
         --output_file "${RAW_OUT_DIR}/${FILE_NAME}.jsonl"
 
+    # 将每个模型组合的参数打包成一行，写入任务队列
     for model_entry in "${MODELS[@]}"; do
         ACT_SUF="${model_entry%%|*}"
         MODEL_NAME="${model_entry##*|}"
-        
-        SLOT_IDX=$((JOB_COUNT % MAX_PARALLEL_JOBS))
-        GPU_IDX=$((SLOT_IDX % NUM_GPUS))
-        ALLOCATED_GPU=${GPU_IDS[$GPU_IDX]}
-
-        run_gpu_step "$FILE_PATH" "$FILE_NAME" "$ACT_SUF" "$MODEL_NAME" "$ALLOCATED_GPU" "$SLOT_IDX" &
-        
-        JOB_COUNT=$((JOB_COUNT + 1))
-        if [ $((JOB_COUNT % MAX_PARALLEL_JOBS)) -eq 0 ]; then
-            echo "--- [GPU Batch Full] Waiting for ${MAX_PARALLEL_JOBS} active jobs to finish ---"
-            wait
-        fi
+        echo "${FILE_PATH}|${FILE_NAME}|${ACT_SUF}|${MODEL_NAME}" >> "$TASK_QUEUE"
     done
 done
+
+echo "Task queue built. Launching GPU Workers..."
+
+# 2. 定义专属 GPU 工人函数
+gpu_worker() {
+    local WORKER_GPU_ID=$1
+    local WORKER_SLOT_ID=$2
+    
+    # -u 9 表示从文件描述符 9 中读取任务。Bash 会自动处理读写锁，保证多工人不抢同一行
+    while IFS='|' read -r -u 9 FILE_PATH FILE_NAME ACT_SUF MODEL_NAME; do
+        # 调用你原来的执行函数
+        run_gpu_step "$FILE_PATH" "$FILE_NAME" "$ACT_SUF" "$MODEL_NAME" "$WORKER_GPU_ID" "$WORKER_SLOT_ID"
+    done
+}
+
+# 3. 将文件绑定到文件描述符 9，开启多工人抢单模式
+exec 9< "$TASK_QUEUE"
+
+# 给每一个设定的 GPU 分配工人
+SLOT_ID=0
+for GPU_ID in "${GPU_IDS[@]}"; do
+    for ((i=0; i<JOBS_PER_GPU; i++)); do
+        gpu_worker "$GPU_ID" "$SLOT_ID" &
+        SLOT_ID=$((SLOT_ID + 1))
+    done
+done
+
+# 等待所有工人停工（队列读完即自动停工）
 wait
+
+# 关闭并清理任务队列
+exec 9<&-
+rm -f "$TASK_QUEUE"
+
 echo "Phase 1 (GPU Extraction) Finished!"
 
 echo -e "\n>>>>>>>>>> PHASE 2: HIGH-CONCURRENCY CPU TRAINING <<<<<<<<<<"
@@ -210,11 +250,13 @@ for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
         run_cpu_step "$FILE_NAME" "$ACT_SUF" "$SLOT_IDX" &
         
         JOB_COUNT_CPU=$((JOB_COUNT_CPU + 1))
-        if [ $((JOB_COUNT_CPU % MAX_CPU_JOBS)) -eq 0 ]; then
-            echo "--- [CPU Batch Full] Waiting for ${MAX_CPU_JOBS} active CPU jobs to finish ---"
-            wait
-        fi
+        
+        # [动态滑动窗口] CPU 端同理，只要达到上限，等待任意一个结束腾出槽位
+        while [ $(jobs -p | wc -l) -ge $MAX_CPU_JOBS ]; do
+            wait -n
+        done
     done
 done
+# 最后一批尾巴任务全部等待完成
 wait
 echo "All done! Pipeline successfully completed."

@@ -6,8 +6,8 @@ Process:
 1. Scan directory to identify missing activations (Pre-check).
 2. Load the model ONLY if there are files to process.
 3. Iterate through the missing files:
-   - Apply Dynamic Chat Template (Qwen / DeepSeek)
-   - Extract hidden states from specified layer (Appended EOS Token)
+   - Apply Dynamic Chat Template via HuggingFace Native Engine
+   - Extract hidden states from specified layer (Last Text Token OR EOS Token)
    - Save activation as PyTorch tensor
 
 Output:
@@ -30,8 +30,8 @@ parser.add_argument("--results_folder", type=str, required=True, help="Path to i
 parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Coder-1.5B-Instruct", help="Model to use for activation extraction")
 parser.add_argument("--activation_layer", type=int, default=-1, help="Which layer to extract activations from (default: last layer)")
 parser.add_argument("--quantize_4bit", action="store_true", help="Enable 4-bit quantization (Use this for large models like 7B+, but NOT recommended for 1.5B)")
-# [新增] 用于调控是否追加 EOS Token 的参数
-parser.add_argument("--append_eos", action="store_true", help="If set, forcefully appends the model's EOS token to the end of the input sequence")
+# [修改] 更加直观的参数名和帮助文档
+parser.add_argument("--eos_token_activation", action="store_true", help="If set, extracts activation from the final EOS special token (index -1). Otherwise, extracts from the last actual text token (index -2).")
 
 args = parser.parse_args()
 MODEL_NAME = args.model_name
@@ -40,23 +40,15 @@ ACT_DIR = pathlib.Path(args.results_folder).joinpath("activations")
 ACT_DIR.mkdir(parents=True, exist_ok=True)
 
 logger.info(f"Save activations to {ACT_DIR}")
-if args.append_eos:
-    logger.info("EOS Token Appending is ENABLED.")
+if args.eos_token_activation:
+    logger.info("EOS Token Activation Extraction is ENABLED (Extracting index -1).")
 else:
-    logger.info("EOS Token Appending is DISABLED.")
+    logger.info("EOS Token Activation Extraction is DISABLED (Extracting index -2).")
 
-def extract_last_token_activation(text_input, hf_model, hf_tok, layer_idx=args.activation_layer):
-    # tokenize 时加上 add_special_tokens=False，防止分词器画蛇添足
-    inputs = hf_tok(text_input, return_tensors="pt", add_special_tokens=False)
-    
-    # [核心修改] 根据传入的参数决定是否在 input_ids 和 attention_mask 的最后追加 EOS Token
-    if args.append_eos:
-        eos_token_id = hf_tok.eos_token_id
-        inputs['input_ids'] = torch.cat([inputs['input_ids'], torch.tensor([[eos_token_id]])], dim=-1)
-        inputs['attention_mask'] = torch.cat([inputs['attention_mask'], torch.tensor([[1]])], dim=-1)
-    
-    # 移至 GPU
-    inputs = inputs.to(hf_model.device)
+# [修改] 参数从 text_input 变为 inputs 字典，由外部传入已完美分词好的 Tensor
+def extract_last_token_activation(inputs, hf_model, hf_tok, layer_idx=args.activation_layer):
+    # 将 inputs 内的 tensor 移动到设备上
+    inputs = {k: v.to(hf_model.device) for k, v in inputs.items()}
     
     with torch.no_grad():
         outputs = hf_model(**inputs, output_hidden_states=True)
@@ -64,13 +56,17 @@ def extract_last_token_activation(text_input, hf_model, hf_tok, layer_idx=args.a
     hidden_states = outputs.hidden_states
     target_layer_states = hidden_states[layer_idx]
     
-    # Extract last token
-    last_token_idx = inputs.input_ids.shape[1] - 1
+    # [核心修改] 根据参数决定提取倒数第几个 Token 的隐藏状态
+    if args.eos_token_activation:
+        last_token_idx = -1  # 提取模型自动补充的 <|im_end|> 或其它 EOS Special Token
+    else:
+        last_token_idx = -2  # 提取回答文本的最后一个真实纯文本 Token
+    
     raw_activation = target_layer_states[0, last_token_idx, :]
     
     # Safety check
     if torch.isnan(raw_activation).any() or torch.isinf(raw_activation).any():
-        logger.error(f"NaN/Inf detected in activation extraction! Text len: {len(text_input)}")
+        logger.error(f"NaN/Inf detected in activation extraction! Sequence len: {inputs['input_ids'].shape[1]}")
     
     # Always convert to float32 on CPU for saving
     last_token_activation = raw_activation.to(torch.float32).detach().cpu()
@@ -89,7 +85,6 @@ for prompt_id_folder in INPUT_FOLDER.glob("*"):
     for fp in prompt_id_folder.glob("*.json"):
         if "labeled" in fp.stem: continue
 
-        # 修复文件名解析 Bug
         try:
             prompt_idx, accum_cot_idx = fp.stem.rsplit("_", 1)
         except ValueError:
@@ -148,17 +143,35 @@ for fp, activation_path in tqdm(todo_tasks, desc="Extracting activations"):
         pure_prompt = item["prompt"]
         pure_response = item.get("final_answer", "")
         
-        # 动态套用 Chat Template
+        # [修改] 放弃手动拼接控制符，构建标准的 messages 列表
         if "DS" in MODEL_NAME or "deepseek" in MODEL_NAME.lower():
             sys_content = "You are an AI programming assistant, utilizing the Deepseek Coder model, developed by Deepseek Company, and you only answer questions related to computer science. For politically sensitive questions, security and privacy issues, and other non-computer science questions, you will refuse to answer."
-            full_text = f"{sys_content}\n### Instruction:\n{pure_prompt}\n### Response:\n{pure_response}"
-            
         else:
             sys_content = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-            full_text = f"<|im_start|>system\n{sys_content}<|im_end|>\n<|im_start|>user\n{pure_prompt}<|im_end|>\n<|im_start|>assistant\n{pure_response}"
+            
+        messages = [
+            {"role": "system", "content": sys_content},
+            {"role": "user", "content": pure_prompt},
+            {"role": "assistant", "content": pure_response}
+        ]
         
     try:
-        activation = extract_last_token_activation(full_text, hf_model, hf_tok)
+        # [核心修改] 交由 HF 官方的 apply_chat_template 渲染模板并直接输出 Tensor ID
+        input_ids = hf_tok.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            return_tensors="pt"
+        )
+        
+        # 构建符合模型输入的字典
+        inputs = {
+            "input_ids": input_ids,
+            "attention_mask": torch.ones_like(input_ids)
+        }
+        
+        # 提取激活值
+        activation = extract_last_token_activation(inputs, hf_model, hf_tok)
         torch.save(activation, activation_path)
     except RuntimeError as e:
         if "out of memory" in str(e):
