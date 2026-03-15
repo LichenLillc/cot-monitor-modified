@@ -1,22 +1,29 @@
+"""
+python3 /home/Lichen/cot-monitor-modified/scripts/reformat_infer_traj.py -i /nfs/data/lichenli/Skywork-OR1/outputs/evaluation/qwen_exit_hacker_ckpt68/TRAIN_full_modified-taco-eval-env_Avg32_temp1.1_exit-hacker-ckpt68_leetcode_hacking_exit_dup1_69.jsonl /nfs/data/lichenli/Skywork-OR1/outputs/evaluation/qwen_exit_hacker_ckpt68/TRAIN_full_modified-taco-eval-env_Avg32_temp1.1_exit-hacker-ckpt68_leetcode_hacking_overlap_dup1_1423.jsonl -o /home/Lichen/cot-monitor-modified/main_table3_paired/labeled_data/qwen_exit-ckpt68_leetcode_hacking_exit_dup1_1492.jsonl --global_dedup_index
+"""
+
 import json
 import argparse
 import pathlib
 import random
+import hashlib
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert Inference JSON/JSONL/Parquet format to Training Trajectory JSONL format.")
-    # [修改 1] 添加 nargs='+'，允许一次传入多个文件路径（例如 *.parquet）
-    parser.add_argument("--input_file", type=str, nargs='+', required=True, help="Path(s) to input inference .json, .jsonl or .parquet files")
-    parser.add_argument("--output_file", type=str, required=True, help="Path to save converted .jsonl file")
+    parser.add_argument("--input_file", '-i', type=str, nargs='+', required=True, help="Path(s) to input inference .json, .jsonl or .parquet files")
+    parser.add_argument("--output_file", '-o', type=str, required=True, help="Path to save converted .jsonl file")
     
-    parser.add_argument("--hacking_label", type=int, default=0, help="Value for hacking_label (default: 1)")
-    parser.add_argument("--hacking_type", type=str, default="normal", help="Value for hacking_type (default: unknown)")
-    parser.add_argument("--traj_source", type=str, default="my_qwen_RH-ckpt61_infer", help="Value for traj_source")
+    parser.add_argument("--hacking_label", type=int, default=1, help="Value for hacking_label (default: 1)")
+    parser.add_argument("--hacking_type", type=str, default="exit", help="Value for hacking_type (default: unknown)")
+    parser.add_argument("--traj_source", type=str, default="my_qwen_exit_RH-ckpt68_infer", help="Value for traj_source")
     
-    parser.add_argument("--max_responses", type=int, default=None, help="Maximum number of responses to keep per prompt (randomly sampled)")
+    parser.add_argument("--max_responses", type=int, default=1, help="Maximum number of responses to keep per prompt within a single row")
+    
+    # [新增] 全局去重开关
+    parser.add_argument("--global_dedup_index", action="store_true", help="Ensure each extra_info.index appears ONLY ONCE across all input files.")
     
     return parser.parse_args()
 
@@ -95,6 +102,7 @@ def process_item(item, args):
     
     paired_data = list(zip(responses, scores))
 
+    # 此处只是行内去重
     if args.max_responses is not None and len(paired_data) > args.max_responses:
         paired_data = random.sample(paired_data, args.max_responses)
 
@@ -146,27 +154,45 @@ def recursive_to_python(obj):
 
 def main():
     args = parse_args()
-    
-    # [修改 2] 逻辑变更：不再一次性加载 args.input_file，而是作为一个列表遍历
-    # 因为 nargs='+' 后，args.input_file 是一个 list: ['file1.parquet', 'file2.parquet']
     input_files = args.input_file 
     output_path = pathlib.Path(args.output_file)
     total_output_items = 0
     
+    # [新增] 建立全局记忆集合
+    seen_indices = set()
+    skipped_duplicates = 0
+    
     print(f"Found {len(input_files)} input file(s) to process.")
+    if args.global_dedup_index:
+        print("🟢 Global Index Deduplication is ENABLED.")
 
     with open(output_path, 'w', encoding='utf-8') as f_out:
-        # 遍历所有输入文件
         for file_path in input_files:
             current_file_items = load_data_smart(file_path)
             if not current_file_items:
                 continue
             
-            # 使用 tqdm 显示当前文件的处理进度，desc 中显示文件名
             file_name = pathlib.Path(file_path).name
             for item in tqdm(current_file_items, desc=f"Converting {file_name}"):
                 new_items = process_item(item, args)
                 for ni in new_items:
+                    
+                    # [新增] 全局去重逻辑
+                    if args.global_dedup_index:
+                        # 尝试获取 index
+                        idx = ni.get("extra_info", {}).get("index", None)
+                        if idx is None:
+                            # 如果没有 index，用 prompt 文本哈希替代
+                            prompt_text = ni.get("prompt", "")
+                            idx = hashlib.md5(prompt_text.encode('utf-8')).hexdigest()[:10]
+                        
+                        # 核心检查
+                        if idx in seen_indices:
+                            skipped_duplicates += 1
+                            continue # 发现重复，直接丢弃！
+                        else:
+                            seen_indices.add(idx)
+
                     try:
                         clean_item = recursive_to_python(ni)
                         f_out.write(json.dumps(clean_item, ensure_ascii=False) + "\n")
@@ -179,10 +205,12 @@ def main():
                         print("="*60 + "\n")
                         raise e
 
-            # 处理完一个文件后释放内存 (对于大文件很重要)
             del current_file_items
 
-    print(f"\nDone! Processed {len(input_files)} files. Saved {total_output_items} trajectories to {output_path}.")
+    print(f"\nDone! Processed {len(input_files)} files.")
+    if args.global_dedup_index:
+        print(f"Removed {skipped_duplicates} duplicate items across files.")
+    print(f"Saved {total_output_items} distinct trajectories to {output_path}.")
 
 if __name__ == "__main__":
     main()

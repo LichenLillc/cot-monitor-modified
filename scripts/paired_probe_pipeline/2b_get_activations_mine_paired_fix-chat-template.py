@@ -7,8 +7,8 @@ Process:
 2. Load the model ONLY if there are files to process.
 3. Iterate through the missing files:
    - Apply Dynamic Chat Template via HuggingFace Native Engine
-   - Extract hidden states from specified layer (Last Text Token OR EOS Token)
-   - Save activation as PyTorch tensor
+   - Extract hidden states from specified layer (Last Text Token AND/OR EOS Token in ONE pass!)
+   - Save activations to their respective independent output folders.
 
 Output:
     Saves PyTorch tensors in format: {prompt_id}_{sentence_id}.pt
@@ -26,28 +26,47 @@ from loguru import logger
 import sys
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--results_folder", type=str, required=True, help="Path to input folder containing json files (e.g., processed/dataset)")
+# [核心修改 1]：拆分结果文件夹参数，并增加模式选择
+parser.add_argument("--results_folder_text", type=str, default=None, help="Path to folder for Last Text Token activations (e.g., processed/dataset_text)")
+parser.add_argument("--results_folder_eos", type=str, default=None, help="Path to folder for EOS Token activations (e.g., processed/dataset_eos)")
+parser.add_argument("--extract_mode", type=str, choices=['both', 'eos', 'text'], default='both', help="Which activations to extract (default: both). Saves computation by doing one forward pass.")
+
 parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Coder-1.5B-Instruct", help="Model to use for activation extraction")
 parser.add_argument("--activation_layer", type=int, default=-1, help="Which layer to extract activations from (default: last layer)")
 parser.add_argument("--quantize_4bit", action="store_true", help="Enable 4-bit quantization (Use this for large models like 7B+, but NOT recommended for 1.5B)")
-# [修改] 更加直观的参数名和帮助文档
-parser.add_argument("--eos_token_activation", action="store_true", help="If set, extracts activation from the final EOS special token (index -1). Otherwise, extracts from the last actual text token (index -2).")
 
 args = parser.parse_args()
 MODEL_NAME = args.model_name
-INPUT_FOLDER = pathlib.Path(args.results_folder).joinpath("labels")
-ACT_DIR = pathlib.Path(args.results_folder).joinpath("activations")
-ACT_DIR.mkdir(parents=True, exist_ok=True)
 
-logger.info(f"Save activations to {ACT_DIR}")
-if args.eos_token_activation:
-    logger.info("EOS Token Activation Extraction is ENABLED (Extracting index -1).")
-else:
-    logger.info("EOS Token Activation Extraction is DISABLED (Extracting index -2).")
+# 验证参数合法性
+if args.extract_mode in ['both', 'text'] and not args.results_folder_text:
+    raise ValueError("CRITICAL ERROR: --results_folder_text MUST be provided when extract_mode is 'both' or 'text'")
+if args.extract_mode in ['both', 'eos'] and not args.results_folder_eos:
+    raise ValueError("CRITICAL ERROR: --results_folder_eos MUST be provided when extract_mode is 'both' or 'eos'")
 
-# [修改] 参数从 text_input 变为 inputs 字典，由外部传入已完美分词好的 Tensor
-def extract_last_token_activation(inputs, hf_model, hf_tok, layer_idx=args.activation_layer):
-    # 将 inputs 内的 tensor 移动到设备上
+# 设置目录结构
+ACT_DIR_TEXT = None
+ACT_DIR_EOS = None
+INPUT_FOLDER = None # 统一从此目录读取 Labels
+
+if args.results_folder_text:
+    INPUT_FOLDER = pathlib.Path(args.results_folder_text).joinpath("labels")
+elif args.results_folder_eos:
+    INPUT_FOLDER = pathlib.Path(args.results_folder_eos).joinpath("labels")
+
+if args.extract_mode in ['both', 'text']:
+    ACT_DIR_TEXT = pathlib.Path(args.results_folder_text).joinpath("activations")
+    ACT_DIR_TEXT.mkdir(parents=True, exist_ok=True)
+if args.extract_mode in ['both', 'eos']:
+    ACT_DIR_EOS = pathlib.Path(args.results_folder_eos).joinpath("activations")
+    ACT_DIR_EOS.mkdir(parents=True, exist_ok=True)
+
+logger.info(f"Extraction Mode: {args.extract_mode.upper()}")
+if ACT_DIR_TEXT: logger.info(f"Save TEXT activations to {ACT_DIR_TEXT}")
+if ACT_DIR_EOS: logger.info(f"Save EOS  activations to {ACT_DIR_EOS}")
+
+# [核心修改 2]：一次前向传播，返回包含多种特征的字典
+def extract_activations(inputs, hf_model, hf_tok, extract_mode, layer_idx=args.activation_layer):
     inputs = {k: v.to(hf_model.device) for k, v in inputs.items()}
     
     with torch.no_grad():
@@ -56,21 +75,23 @@ def extract_last_token_activation(inputs, hf_model, hf_tok, layer_idx=args.activ
     hidden_states = outputs.hidden_states
     target_layer_states = hidden_states[layer_idx]
     
-    # [核心修改] 根据参数决定提取倒数第几个 Token 的隐藏状态
-    if args.eos_token_activation:
-        last_token_idx = -1  # 提取模型自动补充的 <|im_end|> 或其它 EOS Special Token
-    else:
-        last_token_idx = -2  # 提取回答文本的最后一个真实纯文本 Token
+    results = {}
     
-    raw_activation = target_layer_states[0, last_token_idx, :]
-    
-    # Safety check
-    if torch.isnan(raw_activation).any() or torch.isinf(raw_activation).any():
-        logger.error(f"NaN/Inf detected in activation extraction! Sequence len: {inputs['input_ids'].shape[1]}")
-    
-    # Always convert to float32 on CPU for saving
-    last_token_activation = raw_activation.to(torch.float32).detach().cpu()
-    return last_token_activation
+    # 提取 EOS Token (Index -1)
+    if extract_mode in ['both', 'eos']:
+        raw_act_eos = target_layer_states[0, -1, :]
+        if torch.isnan(raw_act_eos).any() or torch.isinf(raw_act_eos).any():
+            logger.error(f"NaN/Inf detected in EOS extraction! Sequence len: {inputs['input_ids'].shape[1]}")
+        results['eos'] = raw_act_eos.to(torch.float32).detach().cpu()
+        
+    # 提取 Last Text Token (Index -2)
+    if extract_mode in ['both', 'text']:
+        raw_act_text = target_layer_states[0, -2, :]
+        if torch.isnan(raw_act_text).any() or torch.isinf(raw_act_text).any():
+            logger.error(f"NaN/Inf detected in TEXT extraction! Sequence len: {inputs['input_ids'].shape[1]}")
+        results['text'] = raw_act_text.to(torch.float32).detach().cpu()
+        
+    return results
 
 #######################
 # 1. Pre-scan Files 
@@ -91,15 +112,27 @@ for prompt_id_folder in INPUT_FOLDER.glob("*"):
             logger.warning(f"Skipping file with unexpected name format: {fp.name}")
             continue
 
-        activation_path = ACT_DIR / f"{prompt_idx}_{accum_cot_idx}.pt"
+        need_processing = False
+        task_info = {"json_path": fp, "text_path": None, "eos_path": None}
         
-        if activation_path.exists():
-            continue
+        # [核心修改 3]：双路校验机制。只有当要求的目录全都有文件时，才跳过
+        if args.extract_mode in ['both', 'text']:
+            text_path = ACT_DIR_TEXT / f"{prompt_idx}_{accum_cot_idx}.pt"
+            task_info["text_path"] = text_path
+            if not text_path.exists():
+                need_processing = True
+                
+        if args.extract_mode in ['both', 'eos']:
+            eos_path = ACT_DIR_EOS / f"{prompt_idx}_{accum_cot_idx}.pt"
+            task_info["eos_path"] = eos_path
+            if not eos_path.exists():
+                need_processing = True
         
-        todo_tasks.append((fp, activation_path))
+        if need_processing:
+            todo_tasks.append(task_info)
 
 if len(todo_tasks) == 0:
-    logger.success("All activations already exist. Exiting without loading model.")
+    logger.success("All required activations already exist. Exiting without loading model.")
     sys.exit(0)
 
 logger.info(f"Found {len(todo_tasks)} files to process.")
@@ -135,7 +168,8 @@ if hf_tok.pad_token is None:
 #######################
 # 3. Collect activations
 #######################
-for fp, activation_path in tqdm(todo_tasks, desc="Extracting activations"):
+for task in tqdm(todo_tasks, desc="Extracting activations"):
+    fp = task["json_path"]
     
     with open(fp, 'r') as f:
         item = json.load(f)
@@ -143,7 +177,6 @@ for fp, activation_path in tqdm(todo_tasks, desc="Extracting activations"):
         pure_prompt = item["prompt"]
         pure_response = item.get("final_answer", "")
         
-        # [修改] 放弃手动拼接控制符，构建标准的 messages 列表
         if "DS" in MODEL_NAME or "deepseek" in MODEL_NAME.lower():
             sys_content = "You are an AI programming assistant, utilizing the Deepseek Coder model, developed by Deepseek Company, and you only answer questions related to computer science. For politically sensitive questions, security and privacy issues, and other non-computer science questions, you will refuse to answer."
         else:
@@ -156,7 +189,6 @@ for fp, activation_path in tqdm(todo_tasks, desc="Extracting activations"):
         ]
         
     try:
-        # [核心修改] 交由 HF 官方的 apply_chat_template 渲染模板并直接输出 Tensor ID
         input_ids = hf_tok.apply_chat_template(
             messages,
             tokenize=True,
@@ -164,15 +196,20 @@ for fp, activation_path in tqdm(todo_tasks, desc="Extracting activations"):
             return_tensors="pt"
         )
         
-        # 构建符合模型输入的字典
         inputs = {
             "input_ids": input_ids,
             "attention_mask": torch.ones_like(input_ids)
         }
         
-        # 提取激活值
-        activation = extract_last_token_activation(inputs, hf_model, hf_tok)
-        torch.save(activation, activation_path)
+        # [核心修改 4]：获取双份特征，并按需分别保存
+        activations_dict = extract_activations(inputs, hf_model, hf_tok, args.extract_mode)
+        
+        if 'text' in activations_dict and task["text_path"]:
+            torch.save(activations_dict['text'], task["text_path"])
+            
+        if 'eos' in activations_dict and task["eos_path"]:
+            torch.save(activations_dict['eos'], task["eos_path"])
+            
     except RuntimeError as e:
         if "out of memory" in str(e):
             logger.error(f"OOM error processing {fp.name}. Skipping.")

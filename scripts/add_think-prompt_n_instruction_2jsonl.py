@@ -3,8 +3,8 @@ import os
 
 # ================= 配置区域 =================
 # 修改这里为你的文件路径
-INPUT_JSONL = "/home/Lichen/cot-monitor-modified/data/_main_table_debug/7b_pfc_cot_ln500-tn500-sh900-mh75-hh36.jsonl"
-OUTPUT_JSONL = "/home/Lichen/cot-monitor-modified/data/_main_table_debug/7b_pfc_think-ins_cot_ln500-tn500-sh900-mh75-hh36.jsonl"
+INPUT_JSONL = "/home/Lichen/cot-monitor-modified/data/labeled_data/7b_pfc-prompted_normal_fixed_cot_6742_leetcode_1385.jsonl"
+OUTPUT_JSONL = "/home/Lichen/cot-monitor-modified/data/labeled_data/7b_pfc-prompted_normal_fixed_cot_6742_leetcode_1385_think-ins.jsonl"
 
 # 1. 放在最后的 Think Prompt
 THINK_STEP_BY_STEP_PROMPT = """\n\nLet's think step by step:\n"""

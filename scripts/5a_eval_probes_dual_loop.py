@@ -500,9 +500,9 @@ def main():
     parser.add_argument("--test_dataset_grandparent_folder", "-dgp", type=str, required=True)
     parser.add_argument("--seed", type=int, default=None)
     # Default output root
-    parser.add_argument("--results_root", type=str, default="../probe_main-table_debug/5a_results_auto_v2")
+    parser.add_argument("--results_root", type=str, default="../main-table3_paired/5a_results_auto_v2")
     # Concurrency Config
-    parser.add_argument("--workers", type=int, default=24, help="Number of parallel processes")
+    parser.add_argument("--workers", type=int, default=48, help="Number of parallel processes")
     
     args = parser.parse_args()
     
