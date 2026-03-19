@@ -178,8 +178,9 @@ def save_probe_outputs_tsv(output_dir, probe_name, prompt_sent_ids, prompts, cot
     })
 
     # Extract prompt_number and sentence_number from prompt_sent_ids
-    df['prompt_number'] = df['prompt_sent_id'].apply(lambda x: int(x.split('_')[0]))
-    df['sentence_number'] = df['prompt_sent_id'].apply(lambda x: int(x.split('_')[1]))
+    # 修改后 (健壮的新代码)：
+    df['prompt_number'] = df['prompt_sent_id'].apply(lambda x: x.rsplit('_', 1)[0])
+    df['sentence_number'] = df['prompt_sent_id'].apply(lambda x: int(x.rsplit('_', 1)[1]))
     
     # Sort by prompt_number then sentence_number
     df = df.sort_values(['prompt_number', 'sentence_number'])
@@ -202,8 +203,8 @@ def save_training_data_tsv(output_dir, prompt_sent_ids, prompts, cots, true_labe
         'true_label': true_labels
     })
 
-    df['prompt_number'] = df['prompt_sent_id'].apply(lambda x: int(x.split('_')[0]))
-    df['sentence_number'] = df['prompt_sent_id'].apply(lambda x: int(x.split('_')[1]))
+    df['prompt_number'] = df['prompt_sent_id'].apply(lambda x: x.rsplit('_', 1)[0])
+    df['sentence_number'] = df['prompt_sent_id'].apply(lambda x: int(x.rsplit('_', 1)[1]))
     
     df = df.sort_values(['prompt_number', 'sentence_number'])
     df = df.drop(['prompt_number', 'sentence_number'], axis=1)
@@ -225,8 +226,8 @@ def save_openai_classifier_outputs_tsv(output_dir, probe_name, prompt_sent_ids, 
         'pred_resp': pred_resps,
     })
 
-    df['prompt_number'] = df['prompt_sent_id'].apply(lambda x: int(x.split('_')[0]))
-    df['sentence_number'] = df['prompt_sent_id'].apply(lambda x: int(x.split('_')[1]))
+    df['prompt_number'] = df['prompt_sent_id'].apply(lambda x: x.rsplit('_', 1)[0])
+    df['sentence_number'] = df['prompt_sent_id'].apply(lambda x: int(x.rsplit('_', 1)[1]))
     
     df = df.sort_values(['prompt_number', 'sentence_number'])
     df = df.drop(['prompt_number', 'sentence_number'], axis=1)

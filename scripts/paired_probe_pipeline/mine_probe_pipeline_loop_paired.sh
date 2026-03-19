@@ -1,20 +1,41 @@
 #!/bin/bash
 # ==============================================================================
-# [NEW] 僵尸进程终结者：捕获 Ctrl+C 和终止信号，自动清理所有子进程
+# [NEW] 僵尸进程终结者 & 全局异常捕获 (Fail-Fast)
 # ==============================================================================
 cleanup() {
-    echo -e "\n🚨 收到终止信号 (Ctrl+C)！正在清理所有后台进程..."
-    # 杀掉当前脚本( $$ )产生的所有子进程
-    pkill -P $$ 
-    echo "✅ 清理完毕，安全退出。"
+    # 卸载 trap 防止递归死循环
+    trap - SIGINT SIGTERM ERR
+    echo -e "\n🚨 收到终止信号或触发致命报错！正在强制清理所有后台进程..."
+    pkill -P $$ || true
+    echo "✅ 清理完毕，流水线安全中止。"
     exit 1
 }
-# 捕获 SIGINT (Ctrl+C) 和 SIGTERM (kill) 信号，触发 cleanup 函数
+
+# 捕获 Ctrl+C 和 SIGTERM 信号
 trap cleanup SIGINT SIGTERM
+# 捕获任何未处理的指令报错 (ERR)，向主进程发送 SIGTERM 从而完美触发 cleanup
+trap 'kill -SIGTERM $$' ERR
+
+# 开启 Bash 严格模式：任何指令/管道报错都会立刻阻断执行并触发 ERR
+set -eE
+set -o pipefail
+
+# ==============================================================================
+# Argument Parsing (NEW: Skip Phase 1)
+# ==============================================================================
+SKIP_GPU=false
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --skip-gpu) SKIP_GPU=true; shift ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+done
+
 # ==============================================================================
 # Configuration
 # ==============================================================================
-
+export HF_HOME="/data/lichenli/hf_cache"
 # 1. Directory Paths
 INPUT_DIR="../../main_table3_paired/exp_0314/exp_data_0314/"
 RAW_OUT_DIR="../../main_table3_paired/exp_0314/raw_outputs/"
@@ -22,8 +43,8 @@ RAW_OUT_DIR="../../main_table3_paired/exp_0314/raw_outputs/"
 # 根目录一分为二，彻底隔离 Text 和 EOS 的数据流
 PROCESSED_DIR_TEXT="../../main_table3_paired/exp_0314/processed_text/"
 PROCESSED_DIR_EOS="../../main_table3_paired/exp_0314/processed_eos/"
-PROBE_OUT_DIR_TEXT="../../main_table3_paired/exp_0314/probe_outputs_text/"
-PROBE_OUT_DIR_EOS="../../main_table3_paired/exp_0314/probe_outputs_eos/"
+PROBE_OUT_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0314/probe_outputs_text/"
+PROBE_OUT_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0314/probe_outputs_eos/"
 
 LOG_DIR="../../main_table3_paired/exp_0314/logs/"
 
@@ -39,13 +60,13 @@ MODELS=(
 
 # 3. Parallelization Configuration
 # --- GPU Config (Phase 1) ---
-GPU_IDS=(4 5 6 7) 
+GPU_IDS=(0 1 2 3)  # 可根据实际情况调整 GPU ID 列表
 NUM_GPUS=${#GPU_IDS[@]}
 JOBS_PER_GPU=1
 MAX_PARALLEL_JOBS=$((NUM_GPUS * JOBS_PER_GPU))
 
 # --- CPU Config (Phase 2) ---
-MAX_CPU_JOBS=48
+MAX_CPU_JOBS=58
 
 echo "Parallel Config [GPU]: ${NUM_GPUS} GPUs, ${JOBS_PER_GPU} jobs/GPU. Total Slots: ${MAX_PARALLEL_JOBS}"
 echo "Parallel Config [CPU]: ${MAX_CPU_JOBS} Total Slots."
@@ -83,7 +104,9 @@ run_gpu_step() {
         --input_file "$TEMP_JSONL" \
         --base_output_dir "$CURRENT_PROCESS_DIR_TEXT" >> "$LOG_FILE" 2>&1 \
     || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 2! Check: $LOG_FILE"; return 1; }
-    rm "$TEMP_JSONL"
+    
+    # [修改点]：加上 -f 防止正常删除时引发报错
+    rm -f "$TEMP_JSONL"
 
     # 生成完毕后，把 text 目录下的结果直接完整复制一份到 eos 目录中
     TEXT_OUTPUT_DIR="${CURRENT_PROCESS_DIR_TEXT}/${FILE_NAME}_${ACT_SUF}"
@@ -103,7 +126,9 @@ run_gpu_step() {
     || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 3! Check: $LOG_FILE"; return 1; }
 
     echo "  ✅ [GPU Slot ${SLOT_ID}] DONE: ${FILE_NAME} (Features Extracted)"
-    rm "$LOG_FILE"
+    
+    # [修改点]：加上 -f
+    rm -f "$LOG_FILE"
 }
 
 run_cpu_step() {
@@ -133,7 +158,6 @@ run_cpu_step() {
             --probe_output_folder "${PROBE_OUT_DIR_TEXT}/${ACT_SUF}" \
             --N_runs 30 \
             --pca_mode both \
-            --store_outputs \
             --save_models >> "$LOG_FILE" 2>&1 \
         || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 4 (TEXT probe)! Check: $LOG_FILE"; return 1; }
 
@@ -143,12 +167,13 @@ run_cpu_step() {
             --probe_output_folder "${PROBE_OUT_DIR_EOS}/${ACT_SUF}" \
             --N_runs 30 \
             --pca_mode both \
-            --store_outputs \
             --save_models >> "$LOG_FILE" 2>&1 \
         || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 4 (EOS probe)! Check: $LOG_FILE"; return 1; }
             
         echo "  ✅ [CPU Slot ${SLOT_ID}] DONE: ${FILE_NAME} (Probes Trained: TEXT & EOS)"
-        rm "$LOG_FILE"
+        
+        # [修改点]：加上 -f
+        rm -f "$LOG_FILE"
     else
         echo "  🟡 [CPU Slot ${SLOT_ID}] Detected 'test' in filename. Skipping 3a."
         echo "  ✅ [CPU Slot ${SLOT_ID}] DONE: ${FILE_NAME} (Probes Skipped)"
@@ -167,56 +192,60 @@ mkdir -p "$PROBE_OUT_DIR_TEXT"
 mkdir -p "$PROBE_OUT_DIR_EOS"
 mkdir -p "$LOG_DIR"
 
-echo -e "\n>>>>>>>>>> PHASE 1: GPU EXTRACTION (Worker Pool Mode) <<<<<<<<<<"
+if [ "$SKIP_GPU" = false ]; then
+    echo -e "\n>>>>>>>>>> PHASE 1: GPU EXTRACTION (Worker Pool Mode) <<<<<<<<<<"
 
-TASK_QUEUE="${PROCESSED_DIR_TEXT}/gpu_task_queue.txt"
-> "$TASK_QUEUE" 
+    TASK_QUEUE="${PROCESSED_DIR_TEXT}/gpu_task_queue.txt"
+    > "$TASK_QUEUE" 
 
-for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
-    FILE_NAME=$(basename "$FILE_PATH" .jsonl)
-    
-    echo "========================================================"
-    echo "Preparing Data File [Phase 1]: ${FILE_NAME}"
-    echo "========================================================"
+    for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
+        FILE_NAME=$(basename "$FILE_PATH" .jsonl)
+        
+        echo "========================================================"
+        echo "Preparing Data File [Phase 1]: ${FILE_NAME}"
+        echo "========================================================"
 
-    echo "[Step 1] Preprocessing ${FILE_NAME}..."
-    python3 0_preprocess_paired.py \
-        --input_file "$FILE_PATH" \
-        --output_file "${RAW_OUT_DIR}/${FILE_NAME}.jsonl"
+        echo "[Step 1] Preprocessing ${FILE_NAME}..."
+        python3 0_preprocess_paired.py \
+            --input_file "$FILE_PATH" \
+            --output_file "${RAW_OUT_DIR}/${FILE_NAME}.jsonl"
 
-    for model_entry in "${MODELS[@]}"; do
-        ACT_SUF="${model_entry%%|*}"
-        MODEL_NAME="${model_entry##*|}"
-        echo "${FILE_PATH}|${FILE_NAME}|${ACT_SUF}|${MODEL_NAME}" >> "$TASK_QUEUE"
+        for model_entry in "${MODELS[@]}"; do
+            ACT_SUF="${model_entry%%|*}"
+            MODEL_NAME="${model_entry##*|}"
+            echo "${FILE_PATH}|${FILE_NAME}|${ACT_SUF}|${MODEL_NAME}" >> "$TASK_QUEUE"
+        done
     done
-done
 
-echo "Task queue built. Launching GPU Workers..."
+    echo "Task queue built. Launching GPU Workers..."
 
-gpu_worker() {
-    local WORKER_GPU_ID=$1
-    local WORKER_SLOT_ID=$2
-    
-    while IFS='|' read -r -u 9 FILE_PATH FILE_NAME ACT_SUF MODEL_NAME; do
-        run_gpu_step "$FILE_PATH" "$FILE_NAME" "$ACT_SUF" "$MODEL_NAME" "$WORKER_GPU_ID" "$WORKER_SLOT_ID"
+    gpu_worker() {
+        local WORKER_GPU_ID=$1
+        local WORKER_SLOT_ID=$2
+        
+        while IFS='|' read -r -u 9 FILE_PATH FILE_NAME ACT_SUF MODEL_NAME; do
+            run_gpu_step "$FILE_PATH" "$FILE_NAME" "$ACT_SUF" "$MODEL_NAME" "$WORKER_GPU_ID" "$WORKER_SLOT_ID"
+        done
+    }
+
+    exec 9< "$TASK_QUEUE"
+
+    SLOT_ID=0
+    for GPU_ID in "${GPU_IDS[@]}"; do
+        for ((i=0; i<JOBS_PER_GPU; i++)); do
+            gpu_worker "$GPU_ID" "$SLOT_ID" &
+            SLOT_ID=$((SLOT_ID + 1))
+        done
     done
-}
 
-exec 9< "$TASK_QUEUE"
+    wait
+    exec 9<&-
+    rm -f "$TASK_QUEUE"
 
-SLOT_ID=0
-for GPU_ID in "${GPU_IDS[@]}"; do
-    for ((i=0; i<JOBS_PER_GPU; i++)); do
-        gpu_worker "$GPU_ID" "$SLOT_ID" &
-        SLOT_ID=$((SLOT_ID + 1))
-    done
-done
-
-wait
-exec 9<&-
-rm -f "$TASK_QUEUE"
-
-echo "Phase 1 (GPU Extraction) Finished!"
+    echo "Phase 1 (GPU Extraction) Finished!"
+else
+    echo -e "\n⏩ Skipping Phase 1 (GPU Extraction) as requested..."
+fi
 
 echo -e "\n>>>>>>>>>> PHASE 2: HIGH-CONCURRENCY CPU TRAINING <<<<<<<<<<"
 JOB_COUNT_CPU=0
