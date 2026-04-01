@@ -1,5 +1,5 @@
 """
-Script: 5a_eval_probes_dual_loop_paired.py (Ultimate Cache & MultiIndex Layout Version)
+Script: 5a_eval_probes_dual_loop_paired.py (Target-Specific Eval Version)
 
 Description:
     Fully automated Matrix Evaluation for Probes.
@@ -8,6 +8,7 @@ Description:
     - [REFACTORED] Layout: Generates one independent Excel file per (Train_Model, Test_Model).
     - [REFACTORED] MultiIndex: Flawless double-header layout with thin borders for L1 group splits.
     - [OPTIMIZED] ID-TEST: Dynamically parses Markdown tables from 3a training summary.
+    - [MODIFIED] Restrained to only evaluate LogReg and MLP-V1.
     - Fast In-Memory Caching & Zero-Copy ProcessPool included.
 """
 
@@ -43,7 +44,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 GLOBAL_CACHE = {}
 
 # ==========================================
-# 1. MLP Definitions
+# 1. MLP Definitions (保留全部类定义以防报错)
 # ==========================================
 class MLP_V1_Shallow(nn.Module):
     def __init__(self, input_size, dropout_rate=0.3):
@@ -161,7 +162,9 @@ def get_id_test_accuracy(model_folder):
     """
     summary_path = model_folder / "training_summary.txt"
     results = {"raw": {}, "pca": {}}
-    for m in ["logreg", "mlp_v1", "mlp_v2", "mlp_v3"]:
+    
+    # [极简修改]：仅保留这两个目标模型
+    for m in ["logreg", "mlp_v1"]:
         results["raw"][m], results["pca"][m] = "N/A", "N/A"
         
     if not summary_path.exists(): return results
@@ -182,7 +185,8 @@ def get_id_test_accuracy(model_folder):
                 if line.strip().startswith("`"): 
                     line_lower = line.lower()
                     for mode in ["raw", "pca"]:
-                        for m in ["logreg", "mlp_v1", "mlp_v2", "mlp_v3"]:
+                        # [极简修改]
+                        for m in ["logreg", "mlp_v1"]:
                             key = f"{m}_{mode}"
                             if f"`{key}" in line_lower:
                                 parts = [p.strip() for p in line.split('|')]
@@ -206,7 +210,8 @@ def evaluate_model_seed_all_datasets(m_path, row_key, dataset_info_list, seed):
     pca_model = joblib.load(pca_path) if pca_path.exists() else None
     
     device = torch.device("cpu")
-    model_types = ["logreg", "mlp_v1", "mlp_v2", "mlp_v3"]
+    # [极简修改]：推断时只加载这两个目标模型
+    model_types = ["logreg", "mlp_v1"]
     loaded_models = {"raw": {}, "pca": {}}
     
     for mode in ["raw", "pca"]:
@@ -299,14 +304,37 @@ def get_train_row_weight(name):
 
 def get_test_col_weight(name):
     name_lower = name.lower()
-    if 'ln' in name_lower: return 1
-    if 'tn' in name_lower: return 2
-    if 'uh' in name_lower: return 3
-    if 'eh' in name_lower: return 4
-    if 'sh' in name_lower: return 5
-    if 'hh' in name_lower: return 6
-    if 'mh' in name_lower: return 7
-    return 8
+    
+    # 1. Normal (ln, tn)
+    if 'ln' in name_lower and 'tn' in name_lower: return 1.0
+    if 'ln' in name_lower: return 1.1
+    if 'tn' in name_lower: return 1.2
+    
+    # 2. Unittest Hacking (luh, tuh, uh)
+    if 'luh' in name_lower and 'tuh' in name_lower: return 3.0
+    if 'luh' in name_lower: return 3.1
+    if 'tuh' in name_lower: return 3.2
+    if 'uh' in name_lower: return 3.3
+    
+    # 3. Exit Hacking (leh, teh, eh)
+    if 'leh' in name_lower and 'teh' in name_lower: return 4.0
+    if 'leh' in name_lower: return 4.1
+    if 'teh' in name_lower: return 4.2
+    if 'eh' in name_lower: return 4.3
+    
+    # 4. Syntax Hacking (lsh, tsh, sh)
+    if 'lsh' in name_lower and 'tsh' in name_lower: return 5.0
+    if 'sh' in name_lower: return 5.1
+    
+    # 5. Hallucination Hacking (lhh, thh, hh)
+    if 'lhh' in name_lower and 'thh' in name_lower: return 6.0
+    if 'hh' in name_lower: return 6.1
+    
+    # 6. Memory Hacking (lmh, tmh, mh)
+    if 'lmh' in name_lower and 'tmh' in name_lower: return 7.0
+    if 'mh' in name_lower: return 7.1
+    
+    return 8.0
 
 # ==========================================
 # 5. Excel Generation (MultiIndex + Thin Borders)
@@ -316,7 +344,6 @@ def generate_pair_excel_report(mp_name, dp_name, cfg, modality_name, reports_dir
     
     L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "qwen7b-pfc"]
     
-    # [核心修复]：在这里补上 L1_ORDER 的排序权重！
     sorted_rows = sorted(cfg["model_rows"], key=lambda x: (L1_ORDER.index(x[0]) if x[0] in L1_ORDER else 99, get_train_row_weight(x[1])))
     
     sorted_cols = sorted(cfg["dataset_cols"], key=lambda x: (L1_ORDER.index(x[0]) if x[0] in L1_ORDER else 99, get_test_col_weight(x[1]), x[1]))
@@ -328,7 +355,8 @@ def generate_pair_excel_report(mp_name, dp_name, cfg, modality_name, reports_dir
     col_index = pd.MultiIndex.from_tuples(col_tuples, names=['Test Type', 'Test Detail'])
 
     with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-        for m_type in ["logreg", "mlp_v1", "mlp_v2", "mlp_v3"]:
+        # [极简修改]：仅针对两个目标模型生成 Sheet
+        for m_type in ["logreg", "mlp_v1"]:
             sheet_name = m_type.upper()
             row_offset = 0
 
@@ -433,7 +461,8 @@ def process_modality(mgp_path, dgp_path, modality_name, args):
                 for ml1, ml2, m_path, id_vals in model_rows:
                     row_key = (ml1, ml2)
                     for mode in ["raw", "pca"]:
-                        for m_type in ["logreg", "mlp_v1", "mlp_v2", "mlp_v3"]:
+                        # [极简修改]：字典预分配只管这两个模型
+                        for m_type in ["logreg", "mlp_v1"]:
                             cfg["report_data"][mode][m_type][row_key] = {"ID-TEST": id_vals[mode][m_type]}
                             for _, col_key in dataset_info_list:
                                 cfg["report_data"][mode][m_type][row_key][col_key] = "N/A"
@@ -489,7 +518,8 @@ def process_modality(mgp_path, dgp_path, modality_name, args):
     for (mp_name, dp_name), cfg in matrix_configs.items():
         if not cfg["is_cached"]:
             for mode in ["raw", "pca"]:
-                for m_type in ["logreg", "mlp_v1", "mlp_v2", "mlp_v3"]:
+                # [极简修改]：最后聚合计算也只管这两个模型
+                for m_type in ["logreg", "mlp_v1"]:
                     for row_key, col_dict in cfg["agg_metrics"][mode][m_type].items():
                         for col_key, acc_list in col_dict.items():
                             if acc_list:
@@ -507,20 +537,16 @@ def process_modality(mgp_path, dgp_path, modality_name, args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mgp_text", type=str, default=None, help="Model grandparent folder for TEXT")
-    parser.add_argument("--dgp_text", type=str, default=None, help="Dataset grandparent folder for TEXT")
-    parser.add_argument("--mgp_eos", type=str, default=None, help="Model grandparent folder for EOS")
-    parser.add_argument("--dgp_eos", type=str, default=None, help="Dataset grandparent folder for EOS")
+    parser.add_argument("--mgp_text", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/probe_outputs_text")
+    parser.add_argument("--dgp_text", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/processed_text")
+    parser.add_argument("--mgp_eos", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/probe_outputs_eos")
+    parser.add_argument("--dgp_eos", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/processed_eos")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--results_root", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0314/debug_replicate/5a_results_0327check/")
-    parser.add_argument("--workers", type=int, default=48, help="Number of parallel workers")
+    parser.add_argument("--results_root", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/5a_results_0328_eos-debugging/")
+    parser.add_argument("--workers", type=int, default=48)
     args = parser.parse_args()
-    
-    if args.mgp_text and args.dgp_text:
-        process_modality(pathlib.Path(args.mgp_text), pathlib.Path(args.dgp_text), "TEXT", args)
-        
-    if args.mgp_eos and args.dgp_eos:
-        process_modality(pathlib.Path(args.mgp_eos), pathlib.Path(args.dgp_eos), "EOS", args)
+    if args.mgp_text and args.dgp_text: process_modality(pathlib.Path(args.mgp_text), pathlib.Path(args.dgp_text), "TEXT_5", args)
+    if args.mgp_eos and args.dgp_eos: process_modality(pathlib.Path(args.mgp_eos), pathlib.Path(args.dgp_eos), "EOS_5", args)
 
 if __name__ == "__main__":
     main()

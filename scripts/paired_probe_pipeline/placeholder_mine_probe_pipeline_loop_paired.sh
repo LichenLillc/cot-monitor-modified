@@ -37,16 +37,16 @@ done
 # ==============================================================================
 export HF_HOME="/data/lichenli/hf_cache"
 # 1. Directory Paths
-INPUT_DIR="../../main_table3_paired/exp_0314/exp_data_0314/"
-RAW_OUT_DIR="../../main_table3_paired/exp_0314/raw_outputs/"
+INPUT_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0314/exp_data_0314/"
+RAW_OUT_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/debug_placeholder/raw_outputs/"
 
 # 根目录一分为二，彻底隔离 Text 和 EOS 的数据流
-PROCESSED_DIR_TEXT="../../main_table3_paired/exp_0314/processed_text/"
-PROCESSED_DIR_EOS="../../main_table3_paired/exp_0314/processed_eos/"
-PROBE_OUT_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0314/probe_outputs_text/"
-PROBE_OUT_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0314/probe_outputs_eos/"
+PROCESSED_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/debug_placeholder/processed_text/"
+PROCESSED_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/debug_placeholder/processed_eos/"
+PROBE_OUT_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/debug_placeholder/probe_outputs_text/"
+PROBE_OUT_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/debug_placeholder/probe_outputs_eos/"
 
-LOG_DIR="../../main_table3_paired/exp_0314/logs/"
+LOG_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/debug_placeholder/logs/"
 
 # 2. Model List (Format: "ACT_SUF|MODEL_NAME")
 MODELS=(
@@ -60,13 +60,13 @@ MODELS=(
 
 # 3. Parallelization Configuration
 # --- GPU Config (Phase 1) ---
-GPU_IDS=(0 1 2 3)  # 可根据实际情况调整 GPU ID 列表
+GPU_IDS=(4 5 6 7)  # 可根据实际情况调整 GPU ID 列表
 NUM_GPUS=${#GPU_IDS[@]}
-JOBS_PER_GPU=1
+JOBS_PER_GPU=3
 MAX_PARALLEL_JOBS=$((NUM_GPUS * JOBS_PER_GPU))
 
 # --- CPU Config (Phase 2) ---
-MAX_CPU_JOBS=48
+MAX_CPU_JOBS=58
 
 echo "Parallel Config [GPU]: ${NUM_GPUS} GPUs, ${JOBS_PER_GPU} jobs/GPU. Total Slots: ${MAX_PARALLEL_JOBS}"
 echo "Parallel Config [CPU]: ${MAX_CPU_JOBS} Total Slots."
@@ -111,8 +111,7 @@ run_gpu_step() {
     # 生成完毕后，把 text 目录下的结果直接完整复制一份到 eos 目录中
     TEXT_OUTPUT_DIR="${CURRENT_PROCESS_DIR_TEXT}/${FILE_NAME}_${ACT_SUF}"
     EOS_OUTPUT_DIR="${CURRENT_PROCESS_DIR_EOS}/${FILE_NAME}_${ACT_SUF}"
-    mkdir -p "$EOS_OUTPUT_DIR"
-    cp -r "${TEXT_OUTPUT_DIR}/labels" "$EOS_OUTPUT_DIR/"
+    cp -r "$TEXT_OUTPUT_DIR" "$CURRENT_PROCESS_DIR_EOS/"
 
     # --- Step 3 ---
     mkdir -p "${TEXT_OUTPUT_DIR}/activations"
