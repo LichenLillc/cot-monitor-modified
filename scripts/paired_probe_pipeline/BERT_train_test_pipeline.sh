@@ -35,12 +35,17 @@ CONFIG_TRAIN_DATASETS=(
 )
 
 SKIP_TRAIN=false
+RUN_CLEANUP=false
 CLI_TRAIN_DATASETS=()
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --skip-train)
             SKIP_TRAIN=true
+            shift
+            ;;
+        --clean)
+            RUN_CLEANUP=true
             shift
             ;;
         --train-dataset)
@@ -52,8 +57,10 @@ while [[ "$#" -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--skip-train] [--train-dataset NAME ...]"
+            echo "Usage: $0 [--skip-train] [--clean] [--train-dataset NAME ...]"
             echo "  --skip-train  Run preprocessing and evaluation, but skip BERT training."
+            echo "  --clean       Remove BERT checkpoints, result summaries, and the evaluation"
+            echo "                matrix before running. Disabled by default."
             echo "  --train-dataset NAME"
             echo "                Override CONFIG_TRAIN_DATASETS for this launch; repeat"
             echo "                the option to select multiple datasets."
@@ -64,7 +71,7 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         *)
             echo "Unknown parameter passed: $1"
-            echo "Usage: $0 [--skip-train] [--train-dataset NAME ...]"
+            echo "Usage: $0 [--skip-train] [--clean] [--train-dataset NAME ...]"
             exit 1
             ;;
     esac
@@ -79,10 +86,10 @@ fi
 # ==============================================================================
 # Configuration (Centralized Paths & Variables)
 # ==============================================================================
-BASE_DIR="${BERT_BASE_DIR:-/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712}"
+BASE_DIR="${BERT_BASE_DIR:-/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712}"
 
 # 1. Directory Paths
-INPUT_DIR="${BERT_INPUT_DIR:-${BASE_DIR}/exp_data_0329_BERT}"
+INPUT_DIR="${BERT_INPUT_DIR:-${BASE_DIR}/exp_data_0716}"
 PREPROCESSED_DIR="${BERT_PREPROCESSED_DIR:-${BASE_DIR}/bert_preprocessed_data_mixed}"
 BERT_OUTPUT_DIR="${BERT_OUTPUT_DIR:-${BASE_DIR}/bert_tsv_and_summaries_mixed}"
 LOG_DIR="${BERT_LOG_DIR:-${BASE_DIR}/bert_logs_mixed}"
@@ -95,6 +102,23 @@ BERT_MASTER_PORT_BASE="${BERT_MASTER_PORT_BASE:-29600}"
 
 # 2. Model
 MODEL_NAME="answerdotai/ModernBERT-large"
+
+if [ "$RUN_CLEANUP" = true ]; then
+    echo -e "\n>>>>>>>>>> PHASE 0: OUTPUT CLEANUP <<<<<<<<<<"
+    for TARGET_DIR in "$BERT_OUTPUT_DIR" "$CHECKPOINT_DIR"; do
+        if [[ -z "$TARGET_DIR" || "$TARGET_DIR" == "/" ]]; then
+            echo "Refusing to clean unsafe output path: '$TARGET_DIR'"
+            exit 1
+        fi
+        echo "Removing: $TARGET_DIR"
+        rm -rf -- "$TARGET_DIR"
+    done
+    echo "Removing: $MATRIX_JSON"
+    rm -f -- "$MATRIX_JSON"
+    echo "✅ Phase 0 cleanup complete."
+else
+    echo -e "\n⏩ Phase 0 cleanup disabled. Existing checkpoints and evaluation results are preserved."
+fi
 
 # Ensure all output directories exist
 mkdir -p "$PREPROCESSED_DIR"

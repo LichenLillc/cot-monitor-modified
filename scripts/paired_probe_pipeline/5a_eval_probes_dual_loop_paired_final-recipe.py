@@ -23,6 +23,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 import sys
 import re
 import json
+import hashlib
 import argparse
 import pathlib
 import collections
@@ -281,6 +282,8 @@ def parse_folder_name(folder_name, suffix_to_remove):
     l1 = "Others"
     if "MIX_pfc-ckpt61" in name: l1 = "mixed"
     elif "7b_pfc_think-ins" in name: l1 = "qwen7b-pfc"
+    elif "qwen7b-infer" in name: l1 = "qwen7b-inference"
+    elif "qwen14b-infer" in name: l1 = "qwen14b-inference"
     elif "qwen_scratch-ckpt61" in name: l1 = "qwen-unittest"
     elif "qwen_exit-ckpt68" in name: l1 = "qwen-exit"
     elif "wild" in name: l1 = "qwen-exit-scratch"
@@ -289,7 +292,7 @@ def parse_folder_name(folder_name, suffix_to_remove):
     elif "ds-1p3b_pfc" in name: l1 = "ds-coder-pfc"
     elif "infer" in name: l1 = "inference"
 
-    keywords = ["MIX_pfc-ckpt61", "7b_pfc_think-ins_cot", "7b_pfc_think-ins", "ds-coder-ckpt280", "ds-coder-exit-ckpt400n7n165", "ds-1p3b_pfc", "qwen_exit-ckpt68", "qwen_scratch-ckpt61", "wild_dup4", "infer"]
+    keywords = ["MIX_pfc-ckpt61", "7b_pfc_think-ins_cot", "7b_pfc_think-ins", "qwen7b-infer", "qwen14b-infer", "ds-coder-ckpt280", "ds-coder-exit-ckpt400n7n165", "ds-1p3b_pfc", "qwen_exit-ckpt68", "qwen_scratch-ckpt61", "wild_dup4", "infer"]
     l2_candidate = name
     for k in keywords: l2_candidate = l2_candidate.replace(k, "")
     l2 = re.sub(r'_+', '_', l2_candidate).strip('_')
@@ -340,13 +343,20 @@ def get_test_col_weight(name):
     
     return 8.0
 
+def get_cache_signature(models, datasets):
+    """Fingerprint the model/test inventory so stale matrix caches are not reused."""
+    inventory = [f"model:{path.name}" for path in models]
+    inventory.extend(f"dataset:{path.name}" for path in datasets)
+    payload = "\n".join(sorted(inventory)).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:12]
+
 # ==========================================
 # 5. Excel Generation (MultiIndex + Thin Borders)
 # ==========================================
 def generate_pair_excel_report(mp_name, dp_name, cfg, modality_name, reports_dir):
     excel_path = reports_dir / f"Train_{mp_name}_on_Test_{dp_name}_{modality_name}.xlsx"
     
-    L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "qwen7b-pfc", "mixed", "ds-coder-unittest", "ds-coder-exit", "ds-coder-pfc", "inference"]
+    L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "qwen7b-pfc", "mixed", "ds-coder-unittest", "ds-coder-exit", "ds-coder-pfc", "qwen7b-inference", "qwen14b-inference", "inference"]
     
     sorted_rows = sorted(cfg["model_rows"], key=lambda x: (L1_ORDER.index(x[0]) if x[0] in L1_ORDER else 99, get_train_row_weight(x[1])))
     
@@ -419,7 +429,7 @@ def process_modality(mgp_path, dgp_path, modality_name, args):
     
     mps = [d for d in mgp_path.iterdir() if d.is_dir()]
     dps = [d for d in dgp_path.iterdir() if d.is_dir()]
-    L1_ORDER = ["inference", "qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "qwen7b-pfc", "mixed", "ds-coder-unittest", "ds-coder-exit", "ds-coder-pfc"]
+    L1_ORDER = ["inference", "qwen7b-inference", "qwen14b-inference", "qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "qwen7b-pfc", "mixed", "ds-coder-unittest", "ds-coder-exit", "ds-coder-pfc"]
     
     global_tasks = []
     matrix_configs = {}
@@ -445,7 +455,8 @@ def process_modality(mgp_path, dgp_path, modality_name, args):
 
             if not model_rows or not dataset_cols: continue
             
-            cache_file = cache_dir / f"Cache_{mp.name}_on_{dp.name}.joblib"
+            cache_signature = get_cache_signature(models, datasets)
+            cache_file = cache_dir / f"Cache_{mp.name}_on_{dp.name}_{cache_signature}.joblib"
             
             cfg = {
                 "model_rows": model_rows,

@@ -21,13 +21,22 @@ set -eE
 set -o pipefail
 
 # ==============================================================================
-# Argument Parsing (NEW: Skip Phase 1)
+# Argument Parsing
 # ==============================================================================
 SKIP_GPU=false
+RUN_CLEANUP=false
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --skip-gpu) SKIP_GPU=true; shift ;;
+        --clean) RUN_CLEANUP=true; shift ;;
+        -h|--help)
+            echo "Usage: $0 [--skip-gpu] [--clean]"
+            echo "  --skip-gpu  Skip GPU activation extraction."
+            echo "  --clean     Remove model/dataset activation and probe caches not present"
+            echo "              in the current configuration. Disabled by default."
+            exit 0
+            ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
 done
@@ -35,29 +44,34 @@ done
 # ==============================================================================
 # Configuration
 # ==============================================================================
-export HF_HOME="/data/lichenli/hf_cache"
+export HF_HOME="${HOME}/.cache/huggingface"
+export HF_TOKEN_PATH="${HOME}/.cache/huggingface/token"
 # 1. Directory Paths
-INPUT_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/exp_data_0327"
-RAW_OUT_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/raw_outputs/"
+INPUT_DIR="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/exp_data_0716"
+RAW_OUT_DIR="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/raw_outputs/"
 
-PROCESSED_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/processed_text/"
-PROCESSED_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/processed_eos/"
-PROBE_OUT_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/probe_outputs_text/"
-PROBE_OUT_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/probe_outputs_eos/"
+PROCESSED_DIR_TEXT="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/processed_text/"
+PROCESSED_DIR_EOS="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/processed_eos/"
+PROBE_OUT_DIR_TEXT="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/probe_outputs_text/"
+PROBE_OUT_DIR_EOS="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/probe_outputs_eos/"
 
-LOG_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/logs/"
+LOG_DIR="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/logs/"
 # 2. Model List
 # MODELS=(
 #     "DS_ckpt280|Lichen2003/DS-Coder-Reward-Hacker-ckpt280"
 #     "DS_exit_ckpt572|Lichen2003/DS-Coder-Exit-Hacker-ckpt400n7n165"
 #     "DS1p3B|deepseek-ai/deepseek-coder-1.3b-instruct"
+#     "Qwen7B|Qwen/Qwen2.5-Coder-7B-Instruct"
+#     "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
+#     "ckpt61|Lichen2003/Reward-Hacker_from-scratch_ckpt61"
+#     "exit_68|Lichen2003/Reward-Hacker_exit_step-68"
 #     "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
 # )
 MODELS=(
     "ckpt61|Lichen2003/Reward-Hacker_from-scratch_ckpt61"
     "exit_68|Lichen2003/Reward-Hacker_exit_step-68"
-    "Qwen7B|Qwen/Qwen2.5-Coder-7B-Instruct"
-    "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    "Qwen/Qwen2.5-Coder-7B-Instruct"
+    "Qwen/Qwen2.5-Coder-14B-Instruct"
 )
 
 # 3. Parallelization Configuration
@@ -73,8 +87,6 @@ mkdir -p "$RAW_OUT_DIR" "$PROCESSED_DIR_TEXT" "$PROCESSED_DIR_EOS" "$PROBE_OUT_D
 # ==============================================================================
 # [NEW] PHASE 0: SMART CLEANUP (Dimensional Purge)
 # ==============================================================================
-echo -e "\n>>>>>>>>>> PHASE 0: SMART CLEANUP <<<<<<<<<<"
-
 # 1. 构建白名单
 MODEL_WL=()
 for m_entry in "${MODELS[@]}"; do MODEL_WL+=("${m_entry%%|*}"); done
@@ -129,13 +141,16 @@ clean_target_roots() {
     done
 }
 
-# 依次执行四个目录的清理
-clean_target_roots "$PROCESSED_DIR_TEXT"
-clean_target_roots "$PROCESSED_DIR_EOS"
-clean_target_roots "$PROBE_OUT_DIR_TEXT"
-clean_target_roots "$PROBE_OUT_DIR_EOS"
-
-echo "✅ Phase 0 Complete. Environment is synchronized with current configuration."
+if [ "$RUN_CLEANUP" = true ]; then
+    echo -e "\n>>>>>>>>>> PHASE 0: SMART CLEANUP <<<<<<<<<<"
+    clean_target_roots "$PROCESSED_DIR_TEXT"
+    clean_target_roots "$PROCESSED_DIR_EOS"
+    clean_target_roots "$PROBE_OUT_DIR_TEXT"
+    clean_target_roots "$PROBE_OUT_DIR_EOS"
+    echo "✅ Phase 0 Complete. Environment is synchronized with current configuration."
+else
+    echo -e "\n⏩ Phase 0 cleanup disabled. Existing activation and probe caches are preserved."
+fi
 
 # ==============================================================================
 # Helper Functions (UNTOUCHED)
