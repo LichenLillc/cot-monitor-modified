@@ -9,7 +9,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Subsample paired/unpaired dataset into smaller strict subsets.")
     parser.add_argument("--input_file", '-i', type=str, required=True, help="Path to the input .jsonl file")
     parser.add_argument("--sizes", '-s', type=int, nargs='+', required=True, help="Target sizes for subsampling (e.g. 200 500)")
-    parser.add_argument("--prefix", '-p', type=str, default="qwen_scratch-ckpt61_unpaired", help="Prefix for the output filename")
+    parser.add_argument("--prefix", '-p', type=str, default="ds-coder-exit-ckpt400n7n165_paired", help="Prefix for the output filename")
     parser.add_argument("--data_source", '-ds', type=str, default=None, help="If provided, only keep data where 'data_source' contains this string (case-insensitive).")
     parser.add_argument("--dry_run", '-dr', action="store_true", help="If set, only print statistics and exit without writing files")
     parser.add_argument("--seed", '-seed', type=int, default=42, help="Random seed for reproducibility")

@@ -29,8 +29,8 @@ parser.add_argument("--text_classifier_model", type=str, default="answerdotai/Mo
 parser.add_argument("--sample_K", type=int, default=-1, help="number of training samples")
 parser.add_argument("--store_outputs", action="store_true", help="whether to store model outputs")
 parser.add_argument("--probe_output_folder", type=str, default="../probe_main-table_debug/BERT_model_ckpts/", help="folder to store model outputs and results")
-parser.add_argument("--truncation_len", default=4096, type=int)
-parser.add_argument("--train_bsz", default=4, type=int)
+parser.add_argument("--truncation_len", default=8192, type=int)
+parser.add_argument("--train_bsz", default=24, type=int)
 
 args = parser.parse_args()
 

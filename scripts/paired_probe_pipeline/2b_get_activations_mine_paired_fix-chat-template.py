@@ -34,6 +34,16 @@ parser.add_argument("--extract_mode", type=str, choices=['both', 'eos', 'text'],
 parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Coder-1.5B-Instruct", help="Model to use for activation extraction")
 parser.add_argument("--activation_layer", type=int, default=-1, help="Which layer to extract activations from (default: last layer)")
 parser.add_argument("--quantize_4bit", action="store_true", help="Enable 4-bit quantization (Use this for large models like 7B+, but NOT recommended for 1.5B)")
+parser.add_argument(
+    "--chat_template_mode",
+    type=str,
+    choices=["probe_training", "grpo_training"],
+    default="probe_training",
+    help=(
+        "probe_training: system+user+assistant, matching the original probe training extractor. "
+        "grpo_training: user+assistant only, matching the current Skywork GRPO monitor penalty implementation."
+    ),
+)
 
 args = parser.parse_args()
 MODEL_NAME = args.model_name
@@ -62,6 +72,7 @@ if args.extract_mode in ['both', 'eos']:
     ACT_DIR_EOS.mkdir(parents=True, exist_ok=True)
 
 logger.info(f"Extraction Mode: {args.extract_mode.upper()}")
+logger.info(f"Chat Template Mode: {args.chat_template_mode}")
 if ACT_DIR_TEXT: logger.info(f"Save TEXT activations to {ACT_DIR_TEXT}")
 if ACT_DIR_EOS: logger.info(f"Save EOS  activations to {ACT_DIR_EOS}")
 
@@ -177,16 +188,22 @@ for task in tqdm(todo_tasks, desc="Extracting activations"):
         pure_prompt = item["prompt"]
         pure_response = item.get("final_answer", "")
         
-        if "DS" in MODEL_NAME or "deepseek" in MODEL_NAME.lower():
-            sys_content = "You are an AI programming assistant, utilizing the Deepseek Coder model, developed by Deepseek Company, and you only answer questions related to computer science. For politically sensitive questions, security and privacy issues, and other non-computer science questions, you will refuse to answer."
+        if args.chat_template_mode == "probe_training":
+            if "DS" in MODEL_NAME or "deepseek" in MODEL_NAME.lower():
+                sys_content = "You are an AI programming assistant, utilizing the Deepseek Coder model, developed by Deepseek Company, and you only answer questions related to computer science. For politically sensitive questions, security and privacy issues, and other non-computer science questions, you will refuse to answer."
+            else:
+                sys_content = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+
+            messages = [
+                {"role": "system", "content": sys_content},
+                {"role": "user", "content": pure_prompt},
+                {"role": "assistant", "content": pure_response}
+            ]
         else:
-            sys_content = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-            
-        messages = [
-            {"role": "system", "content": sys_content},
-            {"role": "user", "content": pure_prompt},
-            {"role": "assistant", "content": pure_response}
-        ]
+            messages = [
+                {"role": "user", "content": pure_prompt},
+                {"role": "assistant", "content": pure_response}
+            ]
         
     try:
         input_ids = hf_tok.apply_chat_template(

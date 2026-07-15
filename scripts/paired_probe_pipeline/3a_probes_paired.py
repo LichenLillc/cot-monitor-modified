@@ -36,7 +36,7 @@ from utils import eval_pred, add_to_final_scores, calculate_metrics_stats, save_
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_folder", type=str, nargs='+', required=True, 
                     help="input folder(s) containing activations and labels")
-parser.add_argument("--N_runs", type=int, default=30, help="number of different seeded runs")
+parser.add_argument("--N_runs", type=int, default=3, help="number of different seeded runs")
 parser.add_argument("--sample_K", type=int, default=-1, help="number of training samples")
 
 # [核心修改] 引入 PCA 模式选择
@@ -97,10 +97,10 @@ def check_if_already_done():
                     models_dir / f"logreg_raw_seed{seed}.joblib",
                     models_dir / f"mlp_v1_raw_seed{seed}.pth",
                     models_dir / f"mlp_v1_scaler_raw_seed{seed}.joblib",
-                    models_dir / f"mlp_v2_raw_seed{seed}.pth",
-                    models_dir / f"mlp_v2_scaler_raw_seed{seed}.joblib",
-                    models_dir / f"mlp_v3_raw_seed{seed}.pth",
-                    models_dir / f"mlp_v3_scaler_raw_seed{seed}.joblib",
+                    # models_dir / f"mlp_v2_raw_seed{seed}.pth",
+                    # models_dir / f"mlp_v2_scaler_raw_seed{seed}.joblib",
+                    # models_dir / f"mlp_v3_raw_seed{seed}.pth",
+                    # models_dir / f"mlp_v3_scaler_raw_seed{seed}.joblib",
                 ])
                 
             if args.pca_mode in ['both', 'pca']:
@@ -109,10 +109,10 @@ def check_if_already_done():
                     models_dir / f"logreg_pca_seed{seed}.joblib",
                     models_dir / f"mlp_v1_pca_seed{seed}.pth",
                     models_dir / f"mlp_v1_scaler_pca_seed{seed}.joblib",
-                    models_dir / f"mlp_v2_pca_seed{seed}.pth",
-                    models_dir / f"mlp_v2_scaler_pca_seed{seed}.joblib",
-                    models_dir / f"mlp_v3_pca_seed{seed}.pth",
-                    models_dir / f"mlp_v3_scaler_pca_seed{seed}.joblib",
+                    # models_dir / f"mlp_v2_pca_seed{seed}.pth",
+                    # models_dir / f"mlp_v2_scaler_pca_seed{seed}.joblib",
+                    # models_dir / f"mlp_v3_pca_seed{seed}.pth",
+                    # models_dir / f"mlp_v3_scaler_pca_seed{seed}.joblib",
                 ])
             
             if not all(f.exists() for f in required_files):
@@ -434,7 +434,8 @@ def main():
     # Track metrics for both modes separately
     score_dicts = {}
     for mode in ['raw', 'pca']:
-        for model_name in ['logreg', 'mlp_v1', 'mlp_v2', 'mlp_v3']:
+        # for model_name in ['logreg', 'mlp_v1', 'mlp_v2', 'mlp_v3']:
+        for model_name in ['logreg', 'mlp_v1']:
             score_dicts[f"{model_name}_{mode}"] = collections.defaultdict(list)
             
     # Baselines
@@ -509,36 +510,36 @@ def main():
             v1_y_pred, v1_y_prob, v1_model, v1_scl = train_mlp(X_train_scaled, y_train, X_val_scaled, y_val, X_test_scaled, y_test, keys_train, 1)
             v1_eval = eval_pred(y_test, v1_y_pred, v1_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
             
-            v2_y_pred, v2_y_prob, v2_model, v2_scl = train_mlp(X_train_scaled, y_train, X_val_scaled, y_val, X_test_scaled, y_test, keys_train, 2)
-            v2_eval = eval_pred(y_test, v2_y_pred, v2_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
+            # v2_y_pred, v2_y_prob, v2_model, v2_scl = train_mlp(X_train_scaled, y_train, X_val_scaled, y_val, X_test_scaled, y_test, keys_train, 2)
+            # v2_eval = eval_pred(y_test, v2_y_pred, v2_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
             
-            v3_y_pred, v3_y_prob, v3_model, v3_scl = train_mlp(X_train_scaled, y_train, X_val_scaled, y_val, X_test_scaled, y_test, keys_train, 3)
-            v3_eval = eval_pred(y_test, v3_y_pred, v3_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
+            # v3_y_pred, v3_y_prob, v3_model, v3_scl = train_mlp(X_train_scaled, y_train, X_val_scaled, y_val, X_test_scaled, y_test, keys_train, 3)
+            # v3_eval = eval_pred(y_test, v3_y_pred, v3_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
             
             seed_record['logreg_raw'] = lr_eval
             seed_record['mlp_v1_raw'] = v1_eval
-            seed_record['mlp_v2_raw'] = v2_eval
-            seed_record['mlp_v3_raw'] = v3_eval
+            # seed_record['mlp_v2_raw'] = v2_eval
+            # seed_record['mlp_v3_raw'] = v3_eval
             
             add_to_final_scores(lr_eval, score_dicts['logreg_raw'], 'logreg_raw')
             add_to_final_scores(v1_eval, score_dicts['mlp_v1_raw'], 'mlp_v1_raw')
-            add_to_final_scores(v2_eval, score_dicts['mlp_v2_raw'], 'mlp_v2_raw')
-            add_to_final_scores(v3_eval, score_dicts['mlp_v3_raw'], 'mlp_v3_raw')
+            # add_to_final_scores(v2_eval, score_dicts['mlp_v2_raw'], 'mlp_v2_raw')
+            # add_to_final_scores(v3_eval, score_dicts['mlp_v3_raw'], 'mlp_v3_raw')
             
             if args.save_models:
                 joblib.dump(lr_model, models_dir / f"logreg_raw_seed{seed}.joblib")
                 torch.save(v1_model.state_dict(), models_dir / f"mlp_v1_raw_seed{seed}.pth")
                 joblib.dump(v1_scl, models_dir / f"mlp_v1_scaler_raw_seed{seed}.joblib")
-                torch.save(v2_model.state_dict(), models_dir / f"mlp_v2_raw_seed{seed}.pth")
-                joblib.dump(v2_scl, models_dir / f"mlp_v2_scaler_raw_seed{seed}.joblib")
-                torch.save(v3_model.state_dict(), models_dir / f"mlp_v3_raw_seed{seed}.pth")
-                joblib.dump(v3_scl, models_dir / f"mlp_v3_scaler_raw_seed{seed}.joblib")
+                # torch.save(v2_model.state_dict(), models_dir / f"mlp_v2_raw_seed{seed}.pth")
+                # joblib.dump(v2_scl, models_dir / f"mlp_v2_scaler_raw_seed{seed}.joblib")
+                # torch.save(v3_model.state_dict(), models_dir / f"mlp_v3_raw_seed{seed}.pth")
+                # joblib.dump(v3_scl, models_dir / f"mlp_v3_scaler_raw_seed{seed}.joblib")
                 
             if args.store_outputs:
                 save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"logreg_raw_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, lr_y_pred, lr_y_prob)
                 save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v1_raw_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v1_y_pred, v1_y_prob)
-                save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v2_raw_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v2_y_pred, v2_y_prob)
-                save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v3_raw_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v3_y_pred, v3_y_prob)
+                # save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v2_raw_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v2_y_pred, v2_y_prob)
+                # save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v3_raw_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v3_y_pred, v3_y_prob)
 
         # =====================================================================
         # 轨道 2: PCA Data Training
@@ -555,37 +556,37 @@ def main():
             v1_y_pred, v1_y_prob, v1_model, v1_scl = train_mlp(X_train_pca, y_train, X_val_pca, y_val, X_test_pca, y_test, keys_train, 1)
             v1_eval = eval_pred(y_test, v1_y_pred, v1_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
             
-            v2_y_pred, v2_y_prob, v2_model, v2_scl = train_mlp(X_train_pca, y_train, X_val_pca, y_val, X_test_pca, y_test, keys_train, 2)
-            v2_eval = eval_pred(y_test, v2_y_pred, v2_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
+            # v2_y_pred, v2_y_prob, v2_model, v2_scl = train_mlp(X_train_pca, y_train, X_val_pca, y_val, X_test_pca, y_test, keys_train, 2)
+            # v2_eval = eval_pred(y_test, v2_y_pred, v2_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
             
-            v3_y_pred, v3_y_prob, v3_model, v3_scl = train_mlp(X_train_pca, y_train, X_val_pca, y_val, X_test_pca, y_test, keys_train, 3)
-            v3_eval = eval_pred(y_test, v3_y_pred, v3_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
+            # v3_y_pred, v3_y_prob, v3_model, v3_scl = train_mlp(X_train_pca, y_train, X_val_pca, y_val, X_test_pca, y_test, keys_train, 3)
+            # v3_eval = eval_pred(y_test, v3_y_pred, v3_y_prob, metrics=["f1", "accuracy", "pr_auc", "auc_roc"])
             
             seed_record['logreg_pca'] = lr_eval
             seed_record['mlp_v1_pca'] = v1_eval
-            seed_record['mlp_v2_pca'] = v2_eval
-            seed_record['mlp_v3_pca'] = v3_eval
+            # seed_record['mlp_v2_pca'] = v2_eval
+            # seed_record['mlp_v3_pca'] = v3_eval
             
             add_to_final_scores(lr_eval, score_dicts['logreg_pca'], 'logreg_pca')
             add_to_final_scores(v1_eval, score_dicts['mlp_v1_pca'], 'mlp_v1_pca')
-            add_to_final_scores(v2_eval, score_dicts['mlp_v2_pca'], 'mlp_v2_pca')
-            add_to_final_scores(v3_eval, score_dicts['mlp_v3_pca'], 'mlp_v3_pca')
+            # add_to_final_scores(v2_eval, score_dicts['mlp_v2_pca'], 'mlp_v2_pca')
+            # add_to_final_scores(v3_eval, score_dicts['mlp_v3_pca'], 'mlp_v3_pca')
             
             if args.save_models:
                 joblib.dump(pca_model, models_dir / f"pca_model_seed{seed}.joblib")
                 joblib.dump(lr_model, models_dir / f"logreg_pca_seed{seed}.joblib")
                 torch.save(v1_model.state_dict(), models_dir / f"mlp_v1_pca_seed{seed}.pth")
                 joblib.dump(v1_scl, models_dir / f"mlp_v1_scaler_pca_seed{seed}.joblib")
-                torch.save(v2_model.state_dict(), models_dir / f"mlp_v2_pca_seed{seed}.pth")
-                joblib.dump(v2_scl, models_dir / f"mlp_v2_scaler_pca_seed{seed}.joblib")
-                torch.save(v3_model.state_dict(), models_dir / f"mlp_v3_pca_seed{seed}.pth")
-                joblib.dump(v3_scl, models_dir / f"mlp_v3_scaler_pca_seed{seed}.joblib")
+                # torch.save(v2_model.state_dict(), models_dir / f"mlp_v2_pca_seed{seed}.pth")
+                # joblib.dump(v2_scl, models_dir / f"mlp_v2_scaler_pca_seed{seed}.joblib")
+                # torch.save(v3_model.state_dict(), models_dir / f"mlp_v3_pca_seed{seed}.pth")
+                # joblib.dump(v3_scl, models_dir / f"mlp_v3_scaler_pca_seed{seed}.joblib")
                 
             if args.store_outputs:
                 save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"logreg_pca_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, lr_y_pred, lr_y_prob)
                 save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v1_pca_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v1_y_pred, v1_y_prob)
-                save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v2_pca_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v2_y_pred, v2_y_prob)
-                save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v3_pca_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v3_y_pred, v3_y_prob)
+                # save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v2_pca_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v2_y_pred, v2_y_prob)
+                # save_probe_outputs_tsv(PROBE_OUTPUT_FOLDER, f"mlp_v3_pca_seed{seed}", keys_test, test_text_prompts, test_text_cots, y_test, v3_y_pred, v3_y_prob)
 
         seed_results.append(seed_record)
 
@@ -631,10 +632,10 @@ def main():
                 record(f"{s:<5} | {'LogReg_'+mode.upper():<13} | {lr['f1']:.4f}   | {lr['accuracy']:.4f}   | {lr['pr_auc']:.4f}   | {lr['auc_roc']:.4f}")
                 m1 = res[f'mlp_v1_{mode}']
                 record(f"{'':<5} | {'MLP_V1_'+mode.upper():<13} | {m1['f1']:.4f}   | {m1['accuracy']:.4f}   | {m1['pr_auc']:.4f}   | {m1['auc_roc']:.4f}")
-                m2 = res[f'mlp_v2_{mode}']
-                record(f"{'':<5} | {'MLP_V2_'+mode.upper():<13} | {m2['f1']:.4f}   | {m2['accuracy']:.4f}   | {m2['pr_auc']:.4f}   | {m2['auc_roc']:.4f}")
-                m3 = res[f'mlp_v3_{mode}']
-                record(f"{'':<5} | {'MLP_V3_'+mode.upper():<13} | {m3['f1']:.4f}   | {m3['accuracy']:.4f}   | {m3['pr_auc']:.4f}   | {m3['auc_roc']:.4f}")
+                # m2 = res[f'mlp_v2_{mode}']
+                # record(f"{'':<5} | {'MLP_V2_'+mode.upper():<13} | {m2['f1']:.4f}   | {m2['accuracy']:.4f}   | {m2['pr_auc']:.4f}   | {m2['auc_roc']:.4f}")
+                # m3 = res[f'mlp_v3_{mode}']
+                # record(f"{'':<5} | {'MLP_V3_'+mode.upper():<13} | {m3['f1']:.4f}   | {m3['accuracy']:.4f}   | {m3['pr_auc']:.4f}   | {m3['auc_roc']:.4f}")
         record("-" * 85)
     record("="*85 + "\n")
 

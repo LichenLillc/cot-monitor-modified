@@ -279,13 +279,17 @@ def parse_folder_name(folder_name, suffix_to_remove):
     name = re.sub(r'_?test_?', '_', name, flags=re.IGNORECASE)
     
     l1 = "Others"
-    if "7b_pfc_think-ins" in name: l1 = "qwen7b-pfc"
-    elif "ds-coder-ckpt280" in name: l1 = "ds-coder"
+    if "MIX_pfc-ckpt61" in name: l1 = "mixed"
+    elif "7b_pfc_think-ins" in name: l1 = "qwen7b-pfc"
     elif "qwen_scratch-ckpt61" in name: l1 = "qwen-unittest"
     elif "qwen_exit-ckpt68" in name: l1 = "qwen-exit"
     elif "wild" in name: l1 = "qwen-exit-scratch"
+    elif "ds-coder-ckpt280" in name: l1 = "ds-coder-unittest"
+    elif "ds-coder-exit-ckpt400n7n165" in name: l1 = "ds-coder-exit"
+    elif "ds-1p3b_pfc" in name: l1 = "ds-coder-pfc"
+    elif "infer" in name: l1 = "inference"
 
-    keywords = ["7b_pfc_think-ins_cot", "7b_pfc_think-ins", "ds-coder-ckpt280", "qwen_exit-ckpt68", "qwen_scratch-ckpt61", "wild_dup4"]
+    keywords = ["MIX_pfc-ckpt61", "7b_pfc_think-ins_cot", "7b_pfc_think-ins", "ds-coder-ckpt280", "ds-coder-exit-ckpt400n7n165", "ds-1p3b_pfc", "qwen_exit-ckpt68", "qwen_scratch-ckpt61", "wild_dup4", "infer"]
     l2_candidate = name
     for k in keywords: l2_candidate = l2_candidate.replace(k, "")
     l2 = re.sub(r'_+', '_', l2_candidate).strip('_')
@@ -296,7 +300,7 @@ def get_train_row_weight(name):
     name_lower = name.lower()
     is_unpaired = 1 if 'unpaired' in name_lower else 0
     clean_name = re.sub(r'ckpt\d+', '', name_lower)
-    clean_name = re.sub(r'7b_pfc|ds-coder|qwen_scratch|qwen_exit|wild_dup4', '', clean_name)
+    clean_name = re.sub(r'mix_pfc-ckpt61|7b_pfc|ds-coder|ds-coder-exit|ds-coder-pfc|qwen_scratch|qwen_exit|wild_dup4|infer', '', clean_name)
     parts = re.findall(r'[a-z]+(\d+)', clean_name)
     num_types = -len(parts)
     total_data = -sum([int(x) for x in parts])
@@ -342,7 +346,7 @@ def get_test_col_weight(name):
 def generate_pair_excel_report(mp_name, dp_name, cfg, modality_name, reports_dir):
     excel_path = reports_dir / f"Train_{mp_name}_on_Test_{dp_name}_{modality_name}.xlsx"
     
-    L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "qwen7b-pfc"]
+    L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "qwen7b-pfc", "mixed", "ds-coder-unittest", "ds-coder-exit", "ds-coder-pfc", "inference"]
     
     sorted_rows = sorted(cfg["model_rows"], key=lambda x: (L1_ORDER.index(x[0]) if x[0] in L1_ORDER else 99, get_train_row_weight(x[1])))
     
@@ -415,7 +419,7 @@ def process_modality(mgp_path, dgp_path, modality_name, args):
     
     mps = [d for d in mgp_path.iterdir() if d.is_dir()]
     dps = [d for d in dgp_path.iterdir() if d.is_dir()]
-    L1_ORDER = ["qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "qwen7b-pfc"]
+    L1_ORDER = ["inference", "qwen-unittest", "qwen-exit", "qwen-exit-scratch", "ds-coder", "qwen7b-pfc", "mixed", "ds-coder-unittest", "ds-coder-exit", "ds-coder-pfc"]
     
     global_tasks = []
     matrix_configs = {}
@@ -537,16 +541,16 @@ def process_modality(mgp_path, dgp_path, modality_name, args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mgp_text", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/probe_outputs_text")
-    parser.add_argument("--dgp_text", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/processed_text")
-    parser.add_argument("--mgp_eos", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/probe_outputs_eos")
-    parser.add_argument("--dgp_eos", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/processed_eos")
+    parser.add_argument("--mgp_text", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/probe_outputs_text")
+    parser.add_argument("--dgp_text", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/processed_text")
+    parser.add_argument("--mgp_eos", type=str, default=None)
+    parser.add_argument("--dgp_eos", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--results_root", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0328/5a_results_0328_eos-debugging/")
+    parser.add_argument("--results_root", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/5a_results_mixed/")
     parser.add_argument("--workers", type=int, default=48)
     args = parser.parse_args()
-    if args.mgp_text and args.dgp_text: process_modality(pathlib.Path(args.mgp_text), pathlib.Path(args.dgp_text), "TEXT_5", args)
-    if args.mgp_eos and args.dgp_eos: process_modality(pathlib.Path(args.mgp_eos), pathlib.Path(args.dgp_eos), "EOS_5", args)
+    if args.mgp_text and args.dgp_text: process_modality(pathlib.Path(args.mgp_text), pathlib.Path(args.dgp_text), "TEXT", args)
+    if args.mgp_eos and args.dgp_eos: process_modality(pathlib.Path(args.mgp_eos), pathlib.Path(args.dgp_eos), "EOS", args)
 
 if __name__ == "__main__":
     main()

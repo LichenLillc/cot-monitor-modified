@@ -37,28 +37,35 @@ done
 # ==============================================================================
 export HF_HOME="/data/lichenli/hf_cache"
 # 1. Directory Paths
-INPUT_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/exp_data_0401/"
-RAW_OUT_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/raw_outputs/"
+INPUT_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/exp_data_0327"
+RAW_OUT_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/raw_outputs/"
 
-PROCESSED_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/processed_text/"
-PROCESSED_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/processed_eos/"
-PROBE_OUT_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/probe_outputs_text/"
-PROBE_OUT_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/probe_outputs_eos/"
+PROCESSED_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/processed_text/"
+PROCESSED_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/processed_eos/"
+PROBE_OUT_DIR_TEXT="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/probe_outputs_text/"
+PROBE_OUT_DIR_EOS="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/probe_outputs_eos/"
 
-LOG_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/logs/"
+LOG_DIR="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/logs/"
 # 2. Model List
+# MODELS=(
+#     "DS_ckpt280|Lichen2003/DS-Coder-Reward-Hacker-ckpt280"
+#     "DS_exit_ckpt572|Lichen2003/DS-Coder-Exit-Hacker-ckpt400n7n165"
+#     "DS1p3B|deepseek-ai/deepseek-coder-1.3b-instruct"
+#     "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
+# )
 MODELS=(
-    "DS_ckpt280|Lichen2003/DS-Coder-Reward-Hacker-ckpt280"
-    "DS_exit_ckpt572|Lichen2003/DS-Coder-Exit-Hacker-ckpt400n7n165"
-    "DS1p3B|deepseek-ai/deepseek-coder-1.3b-instruct"
+    "ckpt61|Lichen2003/Reward-Hacker_from-scratch_ckpt61"
+    "exit_68|Lichen2003/Reward-Hacker_exit_step-68"
+    "Qwen7B|Qwen/Qwen2.5-Coder-7B-Instruct"
+    "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
 )
 
 # 3. Parallelization Configuration
-GPU_IDS=(0 1 2 3)  
+GPU_IDS=(0 1 2 3 4 5 6 7)
 NUM_GPUS=${#GPU_IDS[@]}
-JOBS_PER_GPU=2
+JOBS_PER_GPU=3
 MAX_PARALLEL_JOBS=$((NUM_GPUS * JOBS_PER_GPU))
-MAX_CPU_JOBS=48
+MAX_CPU_JOBS=50
 
 # Ensure directories exist
 mkdir -p "$RAW_OUT_DIR" "$PROCESSED_DIR_TEXT" "$PROCESSED_DIR_EOS" "$PROBE_OUT_DIR_TEXT" "$PROBE_OUT_DIR_EOS" "$LOG_DIR"
@@ -83,29 +90,29 @@ clean_target_roots() {
     local root=$1
     [ -d "$root" ] || return 0
     echo "Scanning root: $root"
-    
+
     for m_path in "$root"/*; do
         [ -d "$m_path" ] || continue
         local m_act_suf=$(basename "$m_path")
-        
+
         # --- L1 模型级校验 ---
         local is_model_valid=false
         for wl_m in "${MODEL_WL[@]}"; do
             if [[ "$m_act_suf" == "$wl_m" ]]; then is_model_valid=true; break; fi
         done
-        
+
         if [ "$is_model_valid" = false ]; then
             echo "  [L1 RM] Obsolete Model Directory: $m_path"
             rm -rf "$m_path"
             continue
         fi
-        
+
         # --- L2 数据集级校验 ---
         for d_path in "$m_path"/*; do
             [ -d "$d_path" ] || continue
             local d_folder_name=$(basename "$d_path")
             local is_data_valid=false
-            
+
             for wl_d in "${DATA_WL[@]}"; do
                 # 匹配目录命名规则: {FILE_NAME}_{ACT_SUF}
                 if [[ "$d_folder_name" == "${wl_d}_${m_act_suf}" ]]; then
@@ -113,7 +120,7 @@ clean_target_roots() {
                     break
                 fi
             done
-            
+
             if [ "$is_data_valid" = false ]; then
                 echo "  [L2 RM] Obsolete Dataset Cache: $d_path"
                 rm -rf "$d_path"
@@ -144,7 +151,7 @@ run_gpu_step() {
 
     local SAFE_MODEL_NAME=$(echo "$ACT_SUF" | tr '/' '_')
     local LOG_FILE="${LOG_DIR}/GPU_${FILE_NAME}_${SAFE_MODEL_NAME}.log"
-    
+
     echo "  [GPU Slot ${SLOT_ID} | GPU ${GPU_ID}] START: ${FILE_NAME} | ${MODEL_NAME}"
     echo "=== GPU Pipeline Start: $(date) ===" > "$LOG_FILE"
 
@@ -155,12 +162,12 @@ run_gpu_step() {
 
     TEMP_JSONL="${RAW_OUT_DIR}/${FILE_NAME}_${ACT_SUF}.jsonl"
     cp "${RAW_OUT_DIR}/${FILE_NAME}.jsonl" "$TEMP_JSONL"
-    
+
     python3 1_2a_converter_mine_paired.py \
         --input_file "$TEMP_JSONL" \
         --base_output_dir "$CURRENT_PROCESS_DIR_TEXT" >> "$LOG_FILE" 2>&1 \
     || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 2! Check: $LOG_FILE"; return 1; }
-    
+
     rm -f "$TEMP_JSONL"
 
     TEXT_OUTPUT_DIR="${CURRENT_PROCESS_DIR_TEXT}/${FILE_NAME}_${ACT_SUF}"
@@ -174,7 +181,7 @@ run_gpu_step() {
     echo "  [GPU Slot ${SLOT_ID}] --> Extracting Dual Activations (Step 3)..."
     CUDA_VISIBLE_DEVICES=$GPU_ID python3 2b_get_activations_mine_paired_fix-chat-template.py \
         --results_folder_text "$TEXT_OUTPUT_DIR" \
-        --results_folder_eos "$EOS_OUTPUT_DIR" \
+        --extract_mode text \
         --model_name "$MODEL_NAME" >> "$LOG_FILE" 2>&1 \
     || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 3! Check: $LOG_FILE"; return 1; }
 
@@ -189,13 +196,13 @@ run_cpu_step() {
 
     local SAFE_MODEL_NAME=$(echo "$ACT_SUF" | tr '/' '_')
     local LOG_FILE="${LOG_DIR}/CPU_${FILE_NAME}_${SAFE_MODEL_NAME}.log"
-    
+
     TEXT_OUTPUT_DIR="${PROCESSED_DIR_TEXT}/${ACT_SUF}/${FILE_NAME}_${ACT_SUF}/"
     EOS_OUTPUT_DIR="${PROCESSED_DIR_EOS}/${ACT_SUF}/${FILE_NAME}_${ACT_SUF}/"
 
     if [[ "$FILE_NAME" != *"test"* ]]; then
         echo "  🟢 [CPU Slot ${SLOT_ID}] Auto-detected train file! Starting 3a_probes_paired.py for TEXT and EOS..."
-        
+
         export OMP_NUM_THREADS=1
         export MKL_NUM_THREADS=1
         export NUMEXPR_NUM_THREADS=1
@@ -205,20 +212,20 @@ run_cpu_step() {
         CUDA_VISIBLE_DEVICES=-1 python3 3a_probes_paired.py \
             --input_folder "$TEXT_OUTPUT_DIR" \
             --probe_output_folder "${PROBE_OUT_DIR_TEXT}/${ACT_SUF}" \
-            --N_runs 30 \
+            --N_runs 5 \
             --pca_mode both \
             --save_models >> "$LOG_FILE" 2>&1 \
         || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 4 (TEXT probe)! Check: $LOG_FILE"; return 1; }
 
-        echo "      -> Training EOS Probes..." >> "$LOG_FILE"
-        CUDA_VISIBLE_DEVICES=-1 python3 3a_probes_paired.py \
-            --input_folder "$EOS_OUTPUT_DIR" \
-            --probe_output_folder "${PROBE_OUT_DIR_EOS}/${ACT_SUF}" \
-            --N_runs 30 \
-            --pca_mode both \
-            --save_models >> "$LOG_FILE" 2>&1 \
-        || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 4 (EOS probe)! Check: $LOG_FILE"; return 1; }
-            
+        # echo "      -> Training EOS Probes..." >> "$LOG_FILE"
+        # CUDA_VISIBLE_DEVICES=-1 python3 3a_probes_paired.py \
+        #     --input_folder "$EOS_OUTPUT_DIR" \
+        #     --probe_output_folder "${PROBE_OUT_DIR_EOS}/${ACT_SUF}" \
+        #     --N_runs 30 \
+        #     --pca_mode both \
+        #     --save_models >> "$LOG_FILE" 2>&1 \
+        # || { echo "  🚨🚨🚨 [CRASH] Slot ${SLOT_ID} crashed at Step 4 (EOS probe)! Check: $LOG_FILE"; return 1; }
+
         echo "  ✅ [CPU Slot ${SLOT_ID}] DONE: ${FILE_NAME} (Probes Trained: TEXT & EOS)"
         rm -f "$LOG_FILE"
     else
@@ -235,7 +242,7 @@ if [ "$SKIP_GPU" = false ]; then
     echo -e "\n>>>>>>>>>> PHASE 1: GPU EXTRACTION (Worker Pool Mode) <<<<<<<<<<"
 
     TASK_QUEUE="${PROCESSED_DIR_TEXT}/gpu_task_queue.txt"
-    > "$TASK_QUEUE" 
+    > "$TASK_QUEUE"
 
     for FILE_PATH in "${INPUT_DIR}"/*.jsonl; do
         FILE_NAME=$(basename "$FILE_PATH" .jsonl)

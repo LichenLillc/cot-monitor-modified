@@ -18,7 +18,7 @@ def parse_args():
     
     parser.add_argument("--hacking_label", type=int, default=1, help="Value for hacking_label (default: 1)")
     parser.add_argument("--hacking_type", type=str, default="exit", help="Value for hacking_type (default: unknown)")
-    parser.add_argument("--traj_source", type=str, default="my_qwen_exit_RH-ckpt68_infer", help="Value for traj_source")
+    parser.add_argument("--traj_source", type=str, default="qwen25_infer", help="Value for traj_source")
     
     parser.add_argument("--max_responses", type=int, default=1, help="Maximum number of responses to keep per prompt within a single row")
     
