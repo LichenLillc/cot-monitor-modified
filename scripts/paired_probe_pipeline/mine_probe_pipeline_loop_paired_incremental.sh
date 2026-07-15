@@ -70,8 +70,8 @@ LOG_DIR="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/log
 MODELS=(
     "ckpt61|Lichen2003/Reward-Hacker_from-scratch_ckpt61"
     "exit_68|Lichen2003/Reward-Hacker_exit_step-68"
-    "Qwen/Qwen2.5-Coder-7B-Instruct"
-    "Qwen/Qwen2.5-Coder-14B-Instruct"
+    "qwen7b|Qwen/Qwen2.5-Coder-7B-Instruct"
+    "qwen14b|Qwen/Qwen2.5-Coder-14B-Instruct"
 )
 
 # 3. Parallelization Configuration
