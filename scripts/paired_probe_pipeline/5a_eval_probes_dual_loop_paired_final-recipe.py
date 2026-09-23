@@ -557,7 +557,7 @@ def main():
     parser.add_argument("--mgp_eos", type=str, default=None)
     parser.add_argument("--dgp_eos", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--results_root", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/5a_results_mixed/")
+    parser.add_argument("--results_root", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/5a_results_0716/")
     parser.add_argument("--workers", type=int, default=48)
     args = parser.parse_args()
     if args.mgp_text and args.dgp_text: process_modality(pathlib.Path(args.mgp_text), pathlib.Path(args.dgp_text), "TEXT", args)

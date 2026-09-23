@@ -62,22 +62,21 @@ LOG_DIR="/nfs/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0712/log
 #     "DS_exit_ckpt572|Lichen2003/DS-Coder-Exit-Hacker-ckpt400n7n165"
 #     "DS1p3B|deepseek-ai/deepseek-coder-1.3b-instruct"
 #     "Qwen7B|Qwen/Qwen2.5-Coder-7B-Instruct"
-#     "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
 #     "ckpt61|Lichen2003/Reward-Hacker_from-scratch_ckpt61"
 #     "exit_68|Lichen2003/Reward-Hacker_exit_step-68"
+#     "qwen14b|Qwen/Qwen2.5-Coder-14B-Instruct"
 #     "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
 # )
 MODELS=(
     "ckpt61|Lichen2003/Reward-Hacker_from-scratch_ckpt61"
     "exit_68|Lichen2003/Reward-Hacker_exit_step-68"
-    "qwen7b|Qwen/Qwen2.5-Coder-7B-Instruct"
-    "qwen14b|Qwen/Qwen2.5-Coder-14B-Instruct"
+    "Qwen1p5B|Qwen/Qwen2.5-Coder-1.5B-Instruct"
 )
 
 # 3. Parallelization Configuration
-GPU_IDS=(0 1 2 3 4 5 6 7)
+GPU_IDS=(4 5 6 7)
 NUM_GPUS=${#GPU_IDS[@]}
-JOBS_PER_GPU=3
+JOBS_PER_GPU=1
 MAX_PARALLEL_JOBS=$((NUM_GPUS * JOBS_PER_GPU))
 MAX_CPU_JOBS=50
 

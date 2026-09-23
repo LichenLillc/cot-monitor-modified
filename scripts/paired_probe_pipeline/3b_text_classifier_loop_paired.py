@@ -40,6 +40,7 @@ parser.add_argument("--truncation_len", default=4096, type=int)
 
 # [NEW] Batch Size & Gradient Accumulation
 parser.add_argument("--train_bsz", default=2, type=int, help="Per device physical batch size")
+parser.add_argument("--eval_bsz", default=2, type=int, help="Per device validation batch size")
 parser.add_argument("--grad_accum", default=3, type=int, help="Gradient accumulation steps")
 
 # [NEW] Logging Argument
@@ -249,7 +250,7 @@ def train_bert_classifier(texts_train, y_train, texts_val, y_val, texts_test, y_
         learning_rate=2e-5,
         per_device_train_batch_size=args.train_bsz,
         gradient_accumulation_steps=args.grad_accum,
-        per_device_eval_batch_size=16,
+        per_device_eval_batch_size=args.eval_bsz,
         warmup_ratio=0.1,
         weight_decay=0.01,
         load_best_model_at_end=True,

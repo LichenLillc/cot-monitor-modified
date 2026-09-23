@@ -99,6 +99,12 @@ MATRIX_JSON="${BERT_MATRIX_JSON:-${BASE_DIR}/bert_eval_matrix_mixed.json}"
 BERT_N_RUNS="${BERT_N_RUNS:-3}"
 BERT_GPUS_PER_TRAINING="${BERT_GPUS_PER_TRAINING:-2}"
 BERT_MASTER_PORT_BASE="${BERT_MASTER_PORT_BASE:-29600}"
+BERT_EVAL_BSZ="${BERT_EVAL_BSZ:-2}"
+BERT_WAIT_FOR_FREE_GPUS="${BERT_WAIT_FOR_FREE_GPUS:-1}"
+BERT_MIN_FREE_MEM_MB="${BERT_MIN_FREE_MEM_MB:-40000}"
+BERT_MAX_GPU_UTIL="${BERT_MAX_GPU_UTIL:-10}"
+BERT_GPU_READY_CHECKS="${BERT_GPU_READY_CHECKS:-3}"
+BERT_GPU_POLL_SECONDS="${BERT_GPU_POLL_SECONDS:-10}"
 
 # 2. Model
 MODEL_NAME="answerdotai/ModernBERT-large"
@@ -168,7 +174,7 @@ fi
 
 # 2. Dynamic Batch Size Math (per independent training job)
 TARGET_EFFECTIVE_BS="${BERT_TARGET_EFFECTIVE_BS:-32}"
-TRAIN_BSZ="${BERT_TRAIN_BSZ:-2}"
+TRAIN_BSZ="${BERT_TRAIN_BSZ:-1}"
 
 # Calculate GRAD_ACCUM: Effective_BS / (Physical_BS * GPUs)
 if (( BERT_GPUS_PER_TRAINING < 1 || BERT_GPUS_PER_TRAINING > NUM_GPUS )); then
@@ -183,7 +189,49 @@ ACTUAL_EFFECTIVE_BS=$(( TRAIN_BSZ * BERT_GPUS_PER_TRAINING * GRAD_ACCUM ))
 MAX_PARALLEL_TRAININGS=$(( NUM_GPUS / BERT_GPUS_PER_TRAINING ))
 
 echo "Visible GPUs: $NUM_GPUS | GPUs per training: $BERT_GPUS_PER_TRAINING | Parallel trainings: $MAX_PARALLEL_TRAININGS"
-echo "Physical BS: $TRAIN_BSZ | Grad Accum: $GRAD_ACCUM | Effective BS: $ACTUAL_EFFECTIVE_BS"
+echo "Train BS: $TRAIN_BSZ | Eval BS: $BERT_EVAL_BSZ | Grad Accum: $GRAD_ACCUM | Effective BS: $ACTUAL_EFFECTIVE_BS"
+if [[ "$BERT_WAIT_FOR_FREE_GPUS" == "1" ]]; then
+    echo "GPU gate: >=${BERT_MIN_FREE_MEM_MB} MiB free and <=${BERT_MAX_GPU_UTIL}% utilization for ${BERT_GPU_READY_CHECKS} checks"
+fi
+
+gpu_group_ready() {
+    local GPU_GROUP="$1"
+    local GPU_ID FREE_MB UTIL
+    local -a GROUP_IDS
+    IFS=',' read -r -a GROUP_IDS <<< "$GPU_GROUP"
+    for GPU_ID in "${GROUP_IDS[@]}"; do
+        IFS=',' read -r FREE_MB UTIL < <(
+            nvidia-smi -i "$GPU_ID" --query-gpu=memory.free,utilization.gpu \
+                --format=csv,noheader,nounits
+        )
+        FREE_MB="${FREE_MB//[[:space:]]/}"
+        UTIL="${UTIL//[[:space:]]/}"
+        if (( FREE_MB < BERT_MIN_FREE_MEM_MB || UTIL > BERT_MAX_GPU_UTIL )); then
+            return 1
+        fi
+    done
+    return 0
+}
+
+wait_for_gpu_group() {
+    local GPU_GROUP="$1"
+    local STABLE=0
+    if [[ "$BERT_WAIT_FOR_FREE_GPUS" != "1" ]]; then
+        return 0
+    fi
+    echo "Waiting for GPUs $GPU_GROUP to become safely available..."
+    while (( STABLE < BERT_GPU_READY_CHECKS )); do
+        if gpu_group_ready "$GPU_GROUP"; then
+            STABLE=$((STABLE + 1))
+            echo "GPUs $GPU_GROUP ready check ${STABLE}/${BERT_GPU_READY_CHECKS}."
+        else
+            STABLE=0
+        fi
+        if (( STABLE < BERT_GPU_READY_CHECKS )); then
+            sleep "$BERT_GPU_POLL_SECONDS"
+        fi
+    done
+}
 
 if [ "$SKIP_TRAIN" = true ]; then
     echo "⏩ Skipping Phase 2 training because --skip-train was provided."
@@ -286,12 +334,14 @@ else
         local PID
         FILE_NAME=$(basename "$FILE_PATH")
 
+        wait_for_gpu_group "$GPU_GROUP"
         echo "🚀 Launching $FILE_NAME seed$SEED on GPUs $GPU_GROUP (port $MASTER_PORT)"
         CUDA_VISIBLE_DEVICES="$GPU_GROUP" OMP_NUM_THREADS=4 \
             torchrun --nproc_per_node="$BERT_GPUS_PER_TRAINING" --master_port="$MASTER_PORT" "${SCRIPT_DIR}/3b_text_classifier_loop_paired.py" \
                 --input_file "$FILE_PATH" \
                 --text_classifier_model "$MODEL_NAME" \
                 --train_bsz "$TRAIN_BSZ" \
+                --eval_bsz "$BERT_EVAL_BSZ" \
                 --grad_accum "$GRAD_ACCUM" \
                 --run_seed "$SEED" \
                 --store_outputs \
@@ -361,6 +411,16 @@ fi
 # ==============================================================================
 echo -e "\n>>>>>>>>>> PHASE 3: MATRIX EVALUATION (TESTING) <<<<<<<<<<"
 
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    EVAL_GPU_GROUP="$CUDA_VISIBLE_DEVICES"
+else
+    EVAL_GPU_GROUP="0"
+    for ((GPU_INDEX=1; GPU_INDEX<NUM_GPUS; GPU_INDEX++)); do
+        EVAL_GPU_GROUP+=",${GPU_INDEX}"
+    done
+fi
+wait_for_gpu_group "$EVAL_GPU_GROUP"
+
 # [NEW] Dynamically calculate safe workers (1 evaluation model per A6000 GPU)
 NUM_WORKERS=$(( NUM_GPUS * 1 ))
 if [ "$NUM_WORKERS" -lt 1 ]; then NUM_WORKERS=1; fi
@@ -374,7 +434,8 @@ python3 "${SCRIPT_DIR}/5b_eval_text_classifier_loop.py" \
     --model_folder "$CHECKPOINT_DIR" \
     --summary_folder "$BERT_OUTPUT_DIR" \
     --output_file "$MATRIX_JSON" \
-    --num_workers "$NUM_WORKERS"
+    --num_workers "$NUM_WORKERS" \
+    --batch_size "$BERT_EVAL_BSZ"
 
 echo "✅ Phase 3 Complete. Evaluation matrix saved to: $MATRIX_JSON"
 echo -e "\n🎉 All done! Unified Train & Test Pipeline successfully completed."

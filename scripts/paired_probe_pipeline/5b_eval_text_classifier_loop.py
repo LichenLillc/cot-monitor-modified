@@ -145,6 +145,7 @@ def worker_eval_model(kwargs):
     datasets = kwargs['datasets']
     gpu_id = kwargs['gpu_id']
     id_test_metrics = kwargs['id_test_metrics']
+    batch_size = kwargs['batch_size']
 
     device = torch.device(f"cuda:{gpu_id}")
 
@@ -161,8 +162,6 @@ def worker_eval_model(kwargs):
 
         for ds_name, (texts, labels) in datasets.items():
             all_preds = []
-            batch_size = 16
-
             for i in range(0, len(texts), batch_size):
                 batch_texts = texts[i : i + batch_size]
                 inputs = tokenizer(
@@ -196,6 +195,7 @@ def main():
     parser.add_argument("--summary_folder", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/exp_0419/bert_tsv_and_summaries", help="Parent folder of folders containing training_summary.txt files")
     parser.add_argument("--output_file", type=str, default="/data/lichenli/cot-monitor-modified/main_table3_paired/exp_0401/exp_0419/bert_eval_matrix.json", help="Path to save JSON results")
     parser.add_argument("--num_workers", type=int, default=24, help="Models to evaluate in parallel")
+    parser.add_argument("--batch_size", type=int, default=2, help="Per-GPU evaluation batch size")
     args = parser.parse_args()
 
     # 1. Preload Test Datasets
@@ -260,7 +260,8 @@ def main():
             'seed_id': seed_id,
             'datasets': datasets,
             'gpu_id': gpu_counter % torch.cuda.device_count(),
-            'id_test_metrics': id_test_metrics
+            'id_test_metrics': id_test_metrics,
+            'batch_size': args.batch_size,
         })
         gpu_counter += 1
 
